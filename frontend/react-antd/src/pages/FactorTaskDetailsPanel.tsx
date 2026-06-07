@@ -6,6 +6,8 @@ import { resolveApiUrl } from '@/services/url'
 export interface FactorTaskDetails {
   expression?: string
   report_url?: string
+  factorhub_report_url?: string
+  quantgpt_report_url?: string
   metrics?: Record<string, any>
   report_metrics?: Record<string, any>
   backtest_summary?: Record<string, any>
@@ -23,6 +25,7 @@ export interface FactorTaskDetails {
     [key: string]: any
   }
   interpretation?: Record<string, any>
+  round_evaluation?: Record<string, any>
   params?: Record<string, any>
   llm?: Record<string, any>
 }
@@ -92,7 +95,9 @@ const FactorTaskDetailsPanel: React.FC<FactorTaskDetailsPanelProps> = ({ taskId,
   const backtest = details.backtest_summary || {}
   const wq = details.wq_brain || {}
   const reportMetrics = details.report_metrics || details.metrics || {}
-  const reportLink = details.report_url ? resolveApiUrl(details.report_url) : undefined
+  const quantSummary = details.round_evaluation || {}
+  const factorhubReportLink = details.factorhub_report_url || details.report_url ? resolveApiUrl(details.factorhub_report_url || details.report_url || '') : undefined
+  const quantgptReportLink = details.quantgpt_report_url ? resolveApiUrl(details.quantgpt_report_url) : undefined
 
   const keyMetrics = [
     { label: 'L/S Sharpe', value: fmtNum(backtest.long_short_sharpe, 2) },
@@ -117,6 +122,18 @@ const FactorTaskDetailsPanel: React.FC<FactorTaskDetailsPanelProps> = ({ taskId,
     { label: 'Grade', value: details.scoring?.grade ? String(details.scoring.grade) : undefined },
     { label: 'Sharpe', value: fmtNum(reportMetrics.sharpe ?? reportMetrics.report_sharpe, 2) },
     { label: 'Max Drawdown', value: fmtPct(reportMetrics.max_drawdown ?? reportMetrics.report_max_drawdown, 1) },
+  ]
+
+  const quantSummaryItems = [
+    { label: 'Primary Problem', value: quantSummary.primary_problem ? fmtText(quantSummary.primary_problem) : undefined },
+    { label: 'Recommended Goal', value: quantSummary.recommended_goal ? fmtText(quantSummary.recommended_goal) : undefined },
+    { label: 'Improvement Reason', value: quantSummary.improvement_reason ? fmtText(quantSummary.improvement_reason) : undefined },
+    {
+      label: 'Base Factors',
+      value: Array.isArray(quantSummary.base_factors) && quantSummary.base_factors.length
+        ? quantSummary.base_factors.join('、')
+        : undefined,
+    },
   ]
 
   return (
@@ -177,9 +194,14 @@ const FactorTaskDetailsPanel: React.FC<FactorTaskDetailsPanelProps> = ({ taskId,
           </div>
         ) : null}
 
-        {details.interpretation && Object.keys(details.interpretation).length ? (
+        {(Object.keys(quantSummary).length || (details.interpretation && Object.keys(details.interpretation).length)) ? (
           <div>
-            <SectionTitle>AI Analysis</SectionTitle>
+            <SectionTitle>QuantGPT Research Summary</SectionTitle>
+            {Object.keys(quantSummary).length ? (
+              <div style={{ marginBottom: details.interpretation && Object.keys(details.interpretation).length ? 12 : 0 }}>
+                <MetricGrid items={quantSummaryItems} />
+              </div>
+            ) : null}
             <Card variant="borderless" bodyStyle={{ padding: 14, background: 'rgba(248, 250, 252, 0.95)', borderRadius: 12 }}>
               {details.interpretation?.conclusion ? <p style={{ fontSize: 13, color: '#0f172a', lineHeight: 1.6 }}><strong>Conclusion: </strong>{fmtText(details.interpretation.conclusion)}</p> : null}
               {details.interpretation?.logic ? <p style={{ fontSize: 13, color: '#0f172a', lineHeight: 1.6 }}><strong>Logic: </strong>{fmtText(details.interpretation.logic)}</p> : null}
@@ -188,20 +210,33 @@ const FactorTaskDetailsPanel: React.FC<FactorTaskDetailsPanelProps> = ({ taskId,
           </div>
         ) : null}
 
-        {reportLink ? (
+        {quantgptReportLink ? (
           <div>
-            <SectionTitle>Backtest Report</SectionTitle>
+            <SectionTitle>QuantGPT Report</SectionTitle>
             <Card variant="borderless" bodyStyle={{ padding: 0, overflow: 'hidden' }}>
               <iframe
-                src={reportLink}
-                title="Backtest Report"
+                src={quantgptReportLink}
+                title="QuantGPT Report"
+                style={{ width: '100%', height: 420, border: 0, display: 'block', background: '#fff' }}
+              />
+            </Card>
+          </div>
+        ) : null}
+
+        {factorhubReportLink ? (
+          <div>
+            <SectionTitle>FactorHub Backtest Report</SectionTitle>
+            <Card variant="borderless" bodyStyle={{ padding: 0, overflow: 'hidden' }}>
+              <iframe
+                src={factorhubReportLink}
+                title="FactorHub Backtest Report"
                 style={{ width: '100%', height: 640, border: 0, display: 'block', background: '#fff' }}
               />
             </Card>
           </div>
         ) : null}
 
-        {!prompt && !expression && !Object.keys(backtest).length && !Object.keys(wq).length && !Object.keys(reportMetrics).length && !reportLink ? (
+        {!prompt && !expression && !Object.keys(backtest).length && !Object.keys(wq).length && !Object.keys(reportMetrics).length && !factorhubReportLink && !quantgptReportLink ? (
           <Empty description="暂无可展示的任务详情" />
         ) : null}
       </Space>

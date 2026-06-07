@@ -250,15 +250,24 @@ interface PersistedRDAgentTaskState {
 const normalizeTaskDetailsForDashboard = (raw?: Record<string, any> | null) => {
   if (!raw || typeof raw !== 'object') return null;
   const reportMetrics = raw.report_metrics || raw.metrics || {};
+  const quantgptReportUrl =
+    raw.quantgpt_report_url
+    || raw.manual_report?.html_report_url
+    || raw.manual_report?.location
+    || raw.raw_report_ref;
+  const factorhubReportUrl = raw.factorhub_report_url || raw.report_url;
   return {
     ...raw,
     report_metrics: reportMetrics,
     metrics: reportMetrics,
     expression: raw.expression || raw.params?.expression || raw.llm?.generated_expression,
-    report_url: raw.report_url,
+    report_url: factorhubReportUrl,
+    factorhub_report_url: factorhubReportUrl,
+    quantgpt_report_url: quantgptReportUrl,
     backtest_summary: raw.backtest_summary || {},
     wq_brain: raw.wq_brain || {},
     interpretation: raw.interpretation || {},
+    round_evaluation: raw.round_evaluation || {},
     params: raw.params || {},
     llm: raw.llm || {},
   };
@@ -271,12 +280,19 @@ const buildFactorTaskDetailsForDashboard = (factor: Partial<AutoFactor> | null |
     ...rawDetails,
     expression: rawDetails.expression || factor.expression || factor.source_expression,
     report_url: rawDetails.report_url || factor.report_url,
+    factorhub_report_url: rawDetails.factorhub_report_url || rawDetails.report_url || factor.report_url,
+    quantgpt_report_url:
+      rawDetails.quantgpt_report_url
+      || rawDetails.manual_report?.html_report_url
+      || rawDetails.manual_report?.location
+      || rawDetails.raw_report_ref,
     report_metrics: rawDetails.report_metrics || rawDetails.metrics || factor.report_metrics || {},
     metrics: rawDetails.metrics || rawDetails.report_metrics || factor.report_metrics || {},
     backtest_summary: rawDetails.backtest_summary || factor.backtest_summary || {},
     wq_brain: rawDetails.wq_brain || factor.wq_brain || {},
     anti_overfit: rawDetails.anti_overfit || factor.anti_overfit || {},
     interpretation: rawDetails.interpretation || factor.interpretation || {},
+    round_evaluation: rawDetails.round_evaluation || {},
     scoring: rawDetails.scoring || {
       score: factor.score,
       grade: factor.grade,
@@ -3294,12 +3310,7 @@ const FactorMining: React.FC = () => {
           {activeTab === "auto" && showContinuePanel ? (
             <Card size="small" style={{ marginTop: 16 }} title="继续探索">
               <Form form={continueForm} layout="vertical" onFinish={startContinueAutoMining}>
-                <Alert
-                  type="info"
-                  showIcon
-                  style={{ marginBottom: 16 }}
-                  message="继续探索会以上一轮最优表达式为新的父代继续优化。你也可以额外导入新的基础因子，让下一轮在原有基础上引入新信息。"
-                />
+                <Tag color="blue" style={{ marginBottom: 16 }}>基于上一轮最优表达式继续优化，可追加新的基础因子</Tag>
                 {continuationInsightSummary ? (
                   <Card size="small" style={{ marginBottom: 16, background: "#fafafa" }} title="上一轮诊断">
                     <Space direction="vertical" size={10} style={{ width: "100%" }}>
@@ -3373,7 +3384,7 @@ const FactorMining: React.FC = () => {
                     type="info"
                     showIcon
                     style={{ marginBottom: 16 }}
-                    message="LLM 补充说明"
+                    message="LLM 已补充下一轮因子"
                     description={continueSelectionSummary}
                   />
                 ) : null}
@@ -3528,7 +3539,7 @@ const FactorMining: React.FC = () => {
                           <Form.Item>
                             <Button block onClick={() => void handleLLMSelectFactors()} loading={llmSelectingFactors}>LLM 自动从因子库筛选因子</Button>
                           </Form.Item>
-                          {llmSelectionSummary ? <Alert type="info" showIcon style={{ marginBottom: 16 }} message="LLM 筛选说明" description={llmSelectionSummary} /> : null}
+                          {llmSelectionSummary ? <Alert type="info" showIcon style={{ marginBottom: 16 }} message="LLM 已完成因子筛选" description={llmSelectionSummary} /> : null}
 
                           <Form.Item name="base_factors" rules={[{ required: true, message: "请至少导入一个基础因子" }]}>
                             <Select mode="multiple" placeholder="选择要导入的因子" showSearch optionLabelProp="label" maxTagCount="responsive">{renderFactorOptions()}</Select>
@@ -3585,13 +3596,9 @@ const FactorMining: React.FC = () => {
                                 <Form.Item label="模型" name="model" rules={[{ required: true, message: '请输入模型名' }]}>
                                   <Input placeholder="deepseek-chat" />
                                 </Form.Item>
-                                <Alert
-                                  type={llmConfig?.has_api_key ? 'success' : 'warning'}
-                                  showIcon
-                                  style={{ marginBottom: 16 }}
-                                  message={llmConfig?.has_api_key ? '已检测到 LLM API Key' : '尚未配置 LLM API Key'}
-                                  description={llmConfig?.message || '保存后新任务生效。'}
-                                />
+                                <Tag color={llmConfig?.has_api_key ? 'green' : 'orange'} style={{ marginBottom: 16 }}>
+                                  {llmConfig?.has_api_key ? 'LLM 已连接' : 'LLM 未配置'}
+                                </Tag>
                                 <div className="mobile-action-stack">
                                   <Button type="primary" onClick={() => void saveLLMConfig()} loading={llmConfigSaving}>保存配置</Button>
                                   <Button onClick={() => void restartLLMService()} loading={llmRestarting}>检查服务状态</Button>
@@ -3614,13 +3621,9 @@ const FactorMining: React.FC = () => {
                               <Form.Item label="模型" name="model" rules={[{ required: true, message: '请输入模型名' }]}>
                                 <Input placeholder="deepseek-chat" />
                               </Form.Item>
-                              <Alert
-                                type={llmConfig?.has_api_key ? 'success' : 'warning'}
-                                showIcon
-                                style={{ marginBottom: 16 }}
-                                message={llmConfig?.has_api_key ? '已检测到 LLM API Key' : '尚未配置 LLM API Key'}
-                                description={llmConfig?.message || '保存后新任务生效。'}
-                              />
+                              <Tag color={llmConfig?.has_api_key ? 'green' : 'orange'} style={{ marginBottom: 16 }}>
+                                {llmConfig?.has_api_key ? 'LLM 已连接' : 'LLM 未配置'}
+                              </Tag>
                               <div className="mobile-action-stack">
                                 <Button type="primary" onClick={() => void saveLLMConfig()} loading={llmConfigSaving}>保存配置</Button>
                                 <Button onClick={() => void restartLLMService()} loading={llmRestarting}>检查服务状态</Button>
@@ -3642,7 +3645,7 @@ const FactorMining: React.FC = () => {
                           <Form.Item>
                             <Button onClick={() => void handleLLMSelectFactors()} loading={llmSelectingFactors}>LLM 自动从因子库筛选因子</Button>
                           </Form.Item>
-                          {llmSelectionSummary ? <Alert type="info" showIcon style={{ marginBottom: 16 }} message="LLM 筛选说明" description={llmSelectionSummary} /> : null}
+                          {llmSelectionSummary ? <Alert type="info" showIcon style={{ marginBottom: 16 }} message="LLM 已完成因子筛选" description={llmSelectionSummary} /> : null}
 
                           <Divider styles={{ content: { margin: 0 } }} titlePlacement="left">从因子库导入</Divider>
                           <Form.Item name="base_factors" rules={[{ required: true, message: "请至少导入一个基础因子" }]}>
@@ -3694,13 +3697,7 @@ const FactorMining: React.FC = () => {
                       <Form.Item><Button type="primary" htmlType="submit" icon={<PlayCircleOutlined />} loading={loading && activeTab === "auto"} block size="large" disabled={mining}>{mining && activeTab === "auto" ? "研究中..." : "开始自动挖掘"}</Button></Form.Item>
 
                       <Card size="small" title="全自动化挖掘" style={{ marginBottom: 16 }}>
-                        <Alert
-                          type="info"
-                          showIcon
-                          style={{ marginBottom: 16 }}
-                          message="自动重复执行自动挖掘"
-                          description="系统会按设定轮次重复执行自动挖掘，并在每轮结束后按筛选条件保留因子。"
-                        />
+                        <Tag color="blue" style={{ marginBottom: 16 }}>按轮次重复执行，并保留满足筛选条件的因子</Tag>
                         <Row gutter={16}>
                           <Col xs={24} sm={12}>
                             <Form.Item label="累计探索次数" name="automation_exploration_rounds" rules={[{ required: true, message: "请输入累计探索次数" }]}>
