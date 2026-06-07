@@ -7,6 +7,7 @@ import pandas as pd
 from fastapi import BackgroundTasks
 
 from backend.api.routers import mining
+from backend.api.routers import mining_progress
 
 
 class _DummyDBSession:
@@ -186,3 +187,72 @@ def test_start_genetic_mining_returns_without_waiting_for_completion(monkeypatch
         await asyncio.gather(*created_tasks)
 
     asyncio.run(scenario())
+
+
+def test_update_task_from_candidates_appends_fitness_history() -> None:
+    task = {"status": "running", "fitness_history": {"best": [], "average": []}}
+
+    mining_progress.update_task_from_candidates(
+        task,
+        generation=2,
+        total_generations=5,
+        candidates=[
+            {"score": 1.2},
+            {"score": 0.8},
+        ],
+        score_getter=lambda candidate: candidate["score"],
+    )
+
+    assert task["progress"] == 40
+    assert task["current_generation"] == 2
+    assert task["best_fitness"] == 1.2
+    assert task["avg_fitness"] == 1.0
+    assert task["fitness_history"] == {"best": [1.2], "average": [1.0]}
+
+
+def test_run_auto_mining_tracks_incremental_fitness_history(monkeypatch) -> None:
+    task_id = mining._create_task("auto")
+
+    def fake_run_auto_mining(**kwargs):
+        progress_callback = kwargs["progress_callback"]
+        progress_callback(1, 3, {"name": "Factor_A", "score": 1.0})
+        progress_callback(2, 3, {"name": "Factor_B", "score": 2.0})
+        return {
+            "factors": [
+                {"name": "Factor_A", "score": 1.0},
+                {"name": "Factor_B", "score": 2.0},
+            ],
+            "best_score": 2.0,
+            "avg_score": 1.5,
+            "generations": 3,
+            "fitness_history": {"best": [1.0, 2.0], "average": [1.0, 1.5]},
+            "round_evaluation": {"summary": "ok"},
+        }
+
+    monkeypatch.setattr(mining.auto_factor_mining_service, "run_auto_mining", fake_run_auto_mining)
+
+    request = mining.AutoMiningRequest(
+        prompt="improve factors",
+        base_factors=["Alpha1"],
+        start_date="2024-01-01",
+        end_date="2024-01-31",
+        universe="hs300",
+        benchmark="hs300",
+        n_groups=5,
+        holding_period=5,
+        n_candidates=3,
+        direction="score",
+        neutralize_industry=True,
+        neutralize_cap=True,
+    )
+
+    asyncio.run(mining._run_auto_mining(task_id, request))
+
+    task = mining.mining_tasks[task_id]
+    assert task["status"] == "completed"
+    assert task["fitness_history"] == {"best": [1.0, 2.0], "average": [1.0, 1.5]}
+    assert task["round_evaluation"] == {"summary": "ok"}
+    assert task["candidates"] == [
+        {"name": "Factor_A", "score": 1.0},
+        {"name": "Factor_B", "score": 2.0},
+    ]

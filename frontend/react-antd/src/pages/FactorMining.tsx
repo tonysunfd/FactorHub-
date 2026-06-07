@@ -35,6 +35,12 @@ import dayjs from "dayjs";
 import { api } from "@/services/api";
 import { autoMiningApi } from "@/services/autoMining";
 import { resolveApiUrl } from "@/services/url";
+import {
+  buildProgressHistory,
+  EMPTY_FITNESS_HISTORY,
+  hasFitnessHistory,
+  normalizeFitnessHistory,
+} from "@/utils/miningProgress";
 import QuantTaskDetailsPanel from "./FactorTaskDetailsPanel";
 import "./FactorMining.css";
 
@@ -221,21 +227,6 @@ interface AutoMiningSeedState {
   result: AutoMiningResult | null;
   status: MiningStatus | null;
 }
-
-const buildManualChartHistory = (
-  status?: Pick<MiningStatus, "fitness_history" | "current_generation" | "best_fitness" | "avg_fitness"> | null,
-) => {
-  const history = status?.fitness_history;
-  if (history && ((history.best?.length || 0) > 0 || (history.average?.length || 0) > 0)) {
-    return history;
-  }
-  const generationCount = Number(status?.current_generation || 0);
-  if (generationCount <= 0) return undefined;
-  return {
-    best: Array(generationCount).fill(Number(status?.best_fitness || 0)),
-    average: Array(generationCount).fill(Number(status?.avg_fitness || 0)),
-  };
-};
 
 interface ContinueExplorationValues {
   prompt?: string;
@@ -870,8 +861,8 @@ const FactorMining: React.FC = () => {
   }, [activeTab, autoSeedState]);
 
   useEffect(() => {
-    const chartHistory = activeTab === "manual" && mining ? buildManualChartHistory(manualStatus) : undefined;
-    if (chartHistory) {
+    const chartHistory = activeTab === "manual" && mining ? buildProgressHistory(manualStatus) : EMPTY_FITNESS_HISTORY;
+    if (hasFitnessHistory(chartHistory)) {
       if (typeof window !== "undefined") {
         window.requestAnimationFrame(() => {
           updateChart("progress", chartHistory, "进化曲线", "适应度");
@@ -1014,7 +1005,7 @@ const FactorMining: React.FC = () => {
         }
         const normalizedResult = normalizeRDAgentResultForDashboard({
           ...resultResponse.data,
-          fitness_history: resultResponse.data?.fitness_history || status.fitness_history || { best: [], average: [] },
+          fitness_history: normalizeFitnessHistory(resultResponse.data?.fitness_history || status.fitness_history),
         });
         setAutoCampaignResult(normalizedResult);
         setMining(false);
@@ -1086,7 +1077,7 @@ const FactorMining: React.FC = () => {
         total_generations: Number(values.n_generations || 0),
         best_fitness: 0,
         avg_fitness: 0,
-        fitness_history: { best: [], average: [] },
+        fitness_history: EMPTY_FITNESS_HISTORY,
         candidates: [],
       });
       setSavedFactorNames(new Set());
@@ -1113,13 +1104,13 @@ const FactorMining: React.FC = () => {
       const response = (await api.getMiningStatus(taskId)) as any;
       if (!response.success) return;
       const rawStatus = response.data as MiningStatus;
-      const chartHistory = buildManualChartHistory(rawStatus);
+      const chartHistory = buildProgressHistory(rawStatus);
       const status = {
         ...rawStatus,
-        fitness_history: chartHistory || rawStatus.fitness_history || { best: [], average: [] },
+        fitness_history: chartHistory,
       } as MiningStatus;
       setManualStatus(status);
-      if (chartHistory) {
+      if (hasFitnessHistory(chartHistory)) {
         if (typeof window !== "undefined") {
           window.requestAnimationFrame(() => {
             updateChart("progress", chartHistory, "进化曲线", "适应度");
@@ -1133,7 +1124,9 @@ const FactorMining: React.FC = () => {
         setMining(false);
         const result = (await api.getMiningResults(taskId)) as any;
         if (result.success) {
-          const resultFitnessHistory = result.data?.fitness_history || chartHistory || status.fitness_history || { best: [], average: [] };
+          const resultFitnessHistory = normalizeFitnessHistory(
+            result.data?.fitness_history || chartHistory || status.fitness_history,
+          );
           setManualResult({
             ...result.data,
             fitness_history: resultFitnessHistory,
@@ -1339,7 +1332,7 @@ const FactorMining: React.FC = () => {
         total_generations: Number(values.n_candidates || 0),
         best_fitness: 0,
         avg_fitness: 0,
-        fitness_history: { best: [], average: [] },
+        fitness_history: EMPTY_FITNESS_HISTORY,
       });
       setSavedFactorNames(new Set());
       setCurrentStockCode(values.universe || "AUTO");
@@ -1408,7 +1401,7 @@ const FactorMining: React.FC = () => {
         best_fitness: 0,
         avg_fitness: 0,
         retained_count: 0,
-        fitness_history: { best: [], average: [] },
+        fitness_history: EMPTY_FITNESS_HISTORY,
       });
       clearTimers();
       startClock();
@@ -1474,7 +1467,10 @@ const FactorMining: React.FC = () => {
     try {
       const response = (await autoMiningApi.getCampaignStatus(taskId)) as any;
       if (!response.success) return;
-      const status = response.data as AutoCampaignStatus;
+      const status = {
+        ...(response.data as AutoCampaignStatus),
+        fitness_history: buildProgressHistory(response.data as AutoCampaignStatus),
+      } as AutoCampaignStatus;
       setAutoCampaignStatus(status);
       updateChart("progress", status.fitness_history, "自动化研究曲线", "综合分数");
       if (status.status === "completed") {
@@ -1484,7 +1480,7 @@ const FactorMining: React.FC = () => {
         if (result.success) {
           setAutoCampaignResult({
             ...result.data,
-            fitness_history: result.data?.fitness_history || status.fitness_history || { best: [], average: [] },
+            fitness_history: normalizeFitnessHistory(result.data?.fitness_history || status.fitness_history),
           });
         }
       } else if (status.status === "failed") {
@@ -1524,7 +1520,7 @@ const FactorMining: React.FC = () => {
         best_fitness: 0,
         avg_fitness: 0,
         retained_count: 0,
-        fitness_history: { best: [], average: [] },
+        fitness_history: EMPTY_FITNESS_HISTORY,
       });
       setSavedFactorNames(new Set());
       setCurrentStockCode(values.universe || "RDAGENT");
@@ -1580,6 +1576,7 @@ const FactorMining: React.FC = () => {
       const rawStatus = response.data as AutoCampaignStatus;
       const status = {
         ...rawStatus,
+        fitness_history: buildProgressHistory(rawStatus),
         candidates: (rawStatus.candidates || []).map((factor: any) =>
           normalizeRDAgentFactorForDashboard(factor, rawStatus.current_round, taskId)
         ),
@@ -1608,7 +1605,7 @@ const FactorMining: React.FC = () => {
         if (result.success) {
           setAutoCampaignResult(normalizeRDAgentResultForDashboard({
             ...result.data,
-            fitness_history: result.data?.fitness_history || status.fitness_history || { best: [], average: [] },
+            fitness_history: normalizeFitnessHistory(result.data?.fitness_history || status.fitness_history),
           }));
         }
       } else if (status.status === "failed") {
@@ -1712,7 +1709,7 @@ const FactorMining: React.FC = () => {
         best_fitness: 0,
         avg_fitness: 0,
         retained_count: 0,
-        fitness_history: { best: [], average: [] },
+        fitness_history: EMPTY_FITNESS_HISTORY,
       });
       clearTimers();
       startClock();
@@ -1744,7 +1741,7 @@ const FactorMining: React.FC = () => {
     try {
       const previousResult = autoResult;
       const previousStatus = autoStatus;
-      const seedCurve = previousResult?.fitness_history || previousStatus?.fitness_history || { best: [], average: [] };
+      const seedCurve = normalizeFitnessHistory(previousResult?.fitness_history || previousStatus?.fitness_history);
       const seedBest = (seedCurve.best || [0])[(seedCurve.best || [0]).length - 1] || 0;
       const seedAverage = (seedCurve.average || [0])[(seedCurve.average || [0]).length - 1] || 0;
       setAutoSeedState({
@@ -1835,7 +1832,10 @@ const FactorMining: React.FC = () => {
     try {
       const response = (await autoMiningApi.getTaskStatus(taskId)) as any;
       if (!response.success) return;
-      const status = response.data as MiningStatus;
+      const status = {
+        ...(response.data as MiningStatus),
+        fitness_history: buildProgressHistory(response.data as MiningStatus),
+      } as MiningStatus;
       setAutoStatus(status);
       updateChart("progress", status.fitness_history, "研究曲线", "综合分数");
       if (status.status === "completed") {
@@ -1845,7 +1845,7 @@ const FactorMining: React.FC = () => {
         if (result.success) {
           setAutoResult({
             ...result.data,
-            fitness_history: result.data?.fitness_history || status.fitness_history || { best: [], average: [] },
+            fitness_history: normalizeFitnessHistory(result.data?.fitness_history || status.fitness_history),
           });
           setAutoSeedState(null);
         }

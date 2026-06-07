@@ -52,6 +52,7 @@ A full-stack quantitative investment research system integrating factor manageme
 - ✅ **Multi-objective Optimization** - Simultaneously optimize IC, IR, monotonicity, and other objectives
 - ✅ **Factor Generation** - Supports basic operators, function calls, and time window operations
 - ✅ **Parallel Computing** - Parallel population evaluation for acceleration
+- ✅ **Reusable Progress Curve Pipeline** - Manual mining, auto mining, and RDAgent now share standardized task progress snapshots and chart history generation
 
 ![1773500591756](image/README_ZH/1773500591756.png)
 
@@ -112,6 +113,7 @@ FactorHub/
 │   │       ├── factors.py    # Factor management interface
 │   │       ├── analysis.py   # Factor analysis interface
 │   │       ├── mining.py     # Factor mining interface
+│   │       ├── mining_progress.py # Shared mining task progress helpers
 │   │       ├── portfolio.py  # Portfolio analysis interface
 │   │       ├── backtest.py   # Strategy backtesting interface
 │   │       └── data.py       # Data management interface
@@ -122,6 +124,7 @@ FactorHub/
 │   └── core/                  # Core configuration
 ├── frontend/                   # Frontend code
 │   └── react-antd/            # React + Ant Design version
+│       └── src/utils/miningProgress.ts # Shared chart history normalization
 ├── config/                     # Configuration files
 ├── data/                       # Data directory
 ├── docs/                       # Documentation

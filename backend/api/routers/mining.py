@@ -17,6 +17,14 @@ from pydantic import BaseModel
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 from backend.services.auto_factor_mining_service import auto_factor_mining_service
+from backend.api.routers.mining_progress import (
+    build_auto_campaign_status,
+    build_mining_status_payload,
+    finalize_task_result,
+    normalize_fitness_history,
+    update_task_from_candidates,
+    update_task_progress,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -128,21 +136,20 @@ def _store_manual_task_progress(
     avg_fitness: float,
     candidates: Optional[list[dict[str, Any]]] = None,
 ) -> None:
-    progress = int(generation / max(total_generations, 1) * 100)
-    mining_tasks[task_id]["progress"] = progress
-    mining_tasks[task_id]["current_generation"] = generation
-    mining_tasks[task_id]["total_generations"] = total_generations
-    mining_tasks[task_id]["best_fitness"] = float(best_fitness)
-    mining_tasks[task_id]["avg_fitness"] = float(avg_fitness)
-    if "fitness_history" not in mining_tasks[task_id]:
-        mining_tasks[task_id]["fitness_history"] = {"best": [], "average": []}
-    mining_tasks[task_id]["fitness_history"]["best"].append(float(best_fitness))
-    mining_tasks[task_id]["fitness_history"]["average"].append(float(avg_fitness))
+    normalized_candidates = None
     if candidates is not None:
-        mining_tasks[task_id]["candidates"] = [
+        normalized_candidates = [
             _normalize_manual_candidate(candidate, index)
             for index, candidate in enumerate(candidates)
         ]
+    update_task_progress(
+        mining_tasks[task_id],
+        generation=generation,
+        total_generations=total_generations,
+        best_fitness=best_fitness,
+        avg_fitness=avg_fitness,
+        candidates=normalized_candidates,
+    )
 
 
 def _create_task(kind: str) -> str:
@@ -169,41 +176,11 @@ def _build_task_response(task_id: str, message: str) -> dict[str, Any]:
 
 
 def _build_mining_status_payload(task_id: str, task: dict[str, Any]) -> dict[str, Any]:
-    response_data = {
-        "task_id": task_id,
-        "status": task["status"],
-        "progress": task.get("progress", 0),
-        "error": task.get("error"),
-    }
-
-    if task["status"] == "completed" and task.get("result"):
-        result = task["result"]
-        response_data["current_generation"] = result.get("generations", 0)
-        response_data["total_generations"] = result.get("generations", 0)
-        response_data["best_fitness"] = result.get("best_fitness", result.get("best_score", 0))
-        response_data["avg_fitness"] = result.get("avg_fitness", result.get("avg_score", 0))
-        response_data["fitness_history"] = result.get("fitness_history", {"best": [], "average": []})
-    else:
-        response_data["current_generation"] = task.get("current_generation", 0)
-        response_data["total_generations"] = task.get("total_generations", 10)
-        response_data["best_fitness"] = task.get("best_fitness", 0.0)
-        response_data["avg_fitness"] = task.get("avg_fitness", 0.0)
-        response_data["fitness_history"] = task.get("fitness_history", {"best": [], "average": []})
-    response_data["candidates"] = task.get("candidates", [])
-    response_data["round_evaluation"] = task.get("round_evaluation")
-
-    return response_data
+    return build_mining_status_payload(task_id, task)
 
 
 def _build_auto_campaign_status(task_id: str, task: dict[str, Any]) -> dict[str, Any]:
-    payload = _build_mining_status_payload(task_id, task)
-    payload["current_round"] = task.get("current_round", 0)
-    payload["total_rounds"] = task.get("total_rounds", 0)
-    payload["retained_count"] = task.get("retained_count", 0)
-    payload["upstream_status"] = task.get("upstream_status")
-    payload["rounds"] = task.get("rounds", [])
-    payload["latest_round"] = task.get("latest_round")
-    return payload
+    return build_auto_campaign_status(task_id, task)
 
 
 async def _run_auto_mining(task_id: str, request: AutoMiningRequest):
@@ -215,15 +192,14 @@ async def _run_auto_mining(task_id: str, request: AutoMiningRequest):
         mining_tasks[task_id]["candidates"] = []
 
         def _progress(done_count: int, total_count: int, candidate: dict[str, Any]) -> None:
-            progress = int(done_count / max(total_count, 1) * 100)
-            mining_tasks[task_id]["progress"] = progress
-            mining_tasks[task_id]["current_generation"] = done_count
-            mining_tasks[task_id]["total_generations"] = total_count
-            mining_tasks[task_id]["candidates"] = [*mining_tasks[task_id].get("candidates", []), candidate]
-            if mining_tasks[task_id]["candidates"]:
-                scores = [_safe_candidate_score(item) for item in mining_tasks[task_id]["candidates"]]
-                mining_tasks[task_id]["best_fitness"] = max(scores)
-                mining_tasks[task_id]["avg_fitness"] = round(sum(scores) / len(scores), 4)
+            candidates = [*mining_tasks[task_id].get("candidates", []), candidate]
+            update_task_from_candidates(
+                mining_tasks[task_id],
+                generation=done_count,
+                total_generations=total_count,
+                candidates=candidates,
+                score_getter=_safe_candidate_score,
+            )
 
         result = auto_factor_mining_service.run_auto_mining(
             prompt=request.prompt,
@@ -241,16 +217,15 @@ async def _run_auto_mining(task_id: str, request: AutoMiningRequest):
             progress_callback=_progress,
         )
 
-        mining_tasks[task_id]["status"] = "completed"
-        mining_tasks[task_id]["progress"] = 100
-        mining_tasks[task_id]["result"] = result
-        mining_tasks[task_id]["candidates"] = result.get("factors", [])
-        mining_tasks[task_id]["current_generation"] = result.get("generations", 0)
-        mining_tasks[task_id]["total_generations"] = result.get("generations", 0)
-        mining_tasks[task_id]["best_fitness"] = result.get("best_score", 0)
-        mining_tasks[task_id]["avg_fitness"] = result.get("avg_score", 0)
-        mining_tasks[task_id]["fitness_history"] = result.get("fitness_history", {"best": [], "average": []})
-        mining_tasks[task_id]["round_evaluation"] = result.get("round_evaluation")
+        finalize_task_result(
+            mining_tasks[task_id],
+            result,
+            candidates=result.get("factors", []),
+            generation_key="generations",
+            best_key="best_score",
+            avg_key="avg_score",
+            round_evaluation=result.get("round_evaluation"),
+        )
     except Exception as exc:
         logger.error("Auto mining task %s failed: %s", task_id, exc, exc_info=True)
         mining_tasks[task_id]["status"] = "failed"
@@ -268,22 +243,25 @@ async def _run_auto_campaign(task_id: str, request: AutoMiningCampaignRequest):
         mining_tasks[task_id]["candidates"] = []
 
         def _campaign_progress(snapshot: dict[str, Any]) -> None:
+            overall_progress = (
+                ((snapshot.get("current_round", 1) - 1) + snapshot.get("current_generation", 0) / max(request.n_candidates_per_round, 1))
+                / max(request.exploration_rounds, 1)
+            )
+            update_task_progress(
+                mining_tasks[task_id],
+                generation=snapshot.get("current_generation", 0),
+                total_generations=snapshot.get("total_generations", request.n_candidates_per_round),
+                best_fitness=snapshot.get("best_fitness", 0.0),
+                avg_fitness=snapshot.get("avg_fitness", 0.0),
+                candidates=snapshot.get("candidates", []),
+                history=normalize_fitness_history(snapshot.get("fitness_history")),
+                progress=min(99, max(0, int(overall_progress * 100))),
+            )
             mining_tasks[task_id]["current_round"] = snapshot.get("current_round", 0)
             mining_tasks[task_id]["total_rounds"] = snapshot.get("total_rounds", request.exploration_rounds)
             mining_tasks[task_id]["latest_round"] = snapshot.get("latest_round")
             mining_tasks[task_id]["rounds"] = snapshot.get("rounds", [])
             mining_tasks[task_id]["retained_count"] = snapshot.get("retained_count", 0)
-            mining_tasks[task_id]["fitness_history"] = snapshot.get("fitness_history", {"best": [], "average": []})
-            mining_tasks[task_id]["best_fitness"] = snapshot.get("best_fitness", 0.0)
-            mining_tasks[task_id]["avg_fitness"] = snapshot.get("avg_fitness", 0.0)
-            mining_tasks[task_id]["candidates"] = snapshot.get("candidates", [])
-            mining_tasks[task_id]["current_generation"] = snapshot.get("current_generation", 0)
-            mining_tasks[task_id]["total_generations"] = snapshot.get("total_generations", request.n_candidates_per_round)
-            overall_progress = (
-                ((snapshot.get("current_round", 1) - 1) + snapshot.get("current_generation", 0) / max(request.n_candidates_per_round, 1))
-                / max(request.exploration_rounds, 1)
-            )
-            mining_tasks[task_id]["progress"] = min(99, max(0, int(overall_progress * 100)))
 
         campaign_result = auto_factor_mining_service.run_auto_campaign(
             prompt=request.prompt,
@@ -305,16 +283,18 @@ async def _run_auto_campaign(task_id: str, request: AutoMiningCampaignRequest):
             retention_filter=request.retention_filter,
             progress_callback=_campaign_progress,
         )
-        mining_tasks[task_id]["status"] = "completed"
-        mining_tasks[task_id]["progress"] = 100
-        mining_tasks[task_id]["result"] = campaign_result
-        mining_tasks[task_id]["fitness_history"] = campaign_result.get("fitness_history", {"best": [], "average": []})
+        finalize_task_result(
+            mining_tasks[task_id],
+            campaign_result,
+            candidates=campaign_result.get("retained_factors", []),
+            generation_key="generations",
+            best_key="best_score",
+            avg_key="avg_score",
+        )
         mining_tasks[task_id]["retained_count"] = len(campaign_result.get("retained_factors", []))
         mining_tasks[task_id]["rounds"] = campaign_result.get("rounds", [])
         mining_tasks[task_id]["latest_round"] = mining_tasks[task_id]["rounds"][-1] if mining_tasks[task_id]["rounds"] else None
         mining_tasks[task_id]["upstream_status"] = "completed_campaign"
-        mining_tasks[task_id]["best_fitness"] = campaign_result.get("best_score", 0.0)
-        mining_tasks[task_id]["avg_fitness"] = campaign_result.get("avg_score", 0.0)
     except Exception as exc:
         logger.error("Auto campaign task %s failed: %s", task_id, exc, exc_info=True)
         mining_tasks[task_id]["status"] = "failed"
@@ -590,15 +570,11 @@ def _store_manual_mining_result(task_id: str, generations: int, result: dict[str
         "fitness_history": fitness_history,
     }
 
-    mining_tasks[task_id]["status"] = "completed"
-    mining_tasks[task_id]["progress"] = 100
-    mining_tasks[task_id]["result"] = result_data
-    mining_tasks[task_id]["candidates"] = result_data["factors"]
-    mining_tasks[task_id]["current_generation"] = generations
-    mining_tasks[task_id]["total_generations"] = generations
-    mining_tasks[task_id]["best_fitness"] = result_data["best_fitness"]
-    mining_tasks[task_id]["avg_fitness"] = result_data["avg_fitness"]
-    mining_tasks[task_id]["fitness_history"] = fitness_history
+    finalize_task_result(
+        mining_tasks[task_id],
+        result_data,
+        candidates=result_data["factors"],
+    )
 
 
 def _run_simulated_mining_sync(task_id: str, request: GeneticMiningRequest, data, base_factor_codes, factor_service):
