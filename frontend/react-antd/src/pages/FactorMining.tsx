@@ -222,6 +222,21 @@ interface AutoMiningSeedState {
   status: MiningStatus | null;
 }
 
+const buildManualChartHistory = (
+  status?: Pick<MiningStatus, "fitness_history" | "current_generation" | "best_fitness" | "avg_fitness"> | null,
+) => {
+  const history = status?.fitness_history;
+  if (history && ((history.best?.length || 0) > 0 || (history.average?.length || 0) > 0)) {
+    return history;
+  }
+  const generationCount = Number(status?.current_generation || 0);
+  if (generationCount <= 0) return undefined;
+  return {
+    best: Array(generationCount).fill(Number(status?.best_fitness || 0)),
+    average: Array(generationCount).fill(Number(status?.avg_fitness || 0)),
+  };
+};
+
 interface ContinueExplorationValues {
   prompt?: string;
   direction?: string;
@@ -808,12 +823,12 @@ const FactorMining: React.FC = () => {
   useEffect(() => {
     if (activeTab === "manual" && manualResult?.fitness_history) {
       if (typeof window !== "undefined") {
-        window.requestAnimationFrame(() => {
+        const timer = window.setTimeout(() => {
           updateChart("result", manualResult.fitness_history, "完整进化曲线", "适应度");
-        });
-      } else {
-        updateChart("result", manualResult.fitness_history, "完整进化曲线", "适应度");
+        }, 200);
+        return () => window.clearTimeout(timer);
       }
+      updateChart("result", manualResult.fitness_history, "完整进化曲线", "适应度");
     }
   }, [activeTab, manualResult]);
 
@@ -855,13 +870,14 @@ const FactorMining: React.FC = () => {
   }, [activeTab, autoSeedState]);
 
   useEffect(() => {
-    if (activeTab === "manual" && mining && manualStatus?.fitness_history) {
+    const chartHistory = activeTab === "manual" && mining ? buildManualChartHistory(manualStatus) : undefined;
+    if (chartHistory) {
       if (typeof window !== "undefined") {
         window.requestAnimationFrame(() => {
-          updateChart("progress", manualStatus.fitness_history, "进化曲线", "适应度");
+          updateChart("progress", chartHistory, "进化曲线", "适应度");
         });
       } else {
-        updateChart("progress", manualStatus.fitness_history, "进化曲线", "适应度");
+        updateChart("progress", chartHistory, "进化曲线", "适应度");
       }
     }
   }, [activeTab, mining, manualStatus]);
@@ -1096,17 +1112,31 @@ const FactorMining: React.FC = () => {
     try {
       const response = (await api.getMiningStatus(taskId)) as any;
       if (!response.success) return;
-      const status = response.data as MiningStatus;
+      const rawStatus = response.data as MiningStatus;
+      const chartHistory = buildManualChartHistory(rawStatus);
+      const status = {
+        ...rawStatus,
+        fitness_history: chartHistory || rawStatus.fitness_history || { best: [], average: [] },
+      } as MiningStatus;
       setManualStatus(status);
-      updateChart("progress", status.fitness_history, "进化曲线", "适应度");
+      if (chartHistory) {
+        if (typeof window !== "undefined") {
+          window.requestAnimationFrame(() => {
+            updateChart("progress", chartHistory, "进化曲线", "适应度");
+          });
+        } else {
+          updateChart("progress", chartHistory, "进化曲线", "适应度");
+        }
+      }
       if (status.status === "completed") {
         clearTimers();
         setMining(false);
         const result = (await api.getMiningResults(taskId)) as any;
         if (result.success) {
+          const resultFitnessHistory = result.data?.fitness_history || chartHistory || status.fitness_history || { best: [], average: [] };
           setManualResult({
             ...result.data,
-            fitness_history: result.data?.fitness_history || status.fitness_history || { best: [], average: [] },
+            fitness_history: resultFitnessHistory,
           });
         }
       } else if (status.status === "failed") {
