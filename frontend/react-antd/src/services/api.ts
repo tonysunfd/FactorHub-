@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { autoMiningApi } from './autoMining'
 
 // 创建 axios 实例
 const request = axios.create({
@@ -206,17 +207,17 @@ export const api = {
     fitness_objective: string
     ic_threshold: number
   }) {
-    return request.post('/mining/genetic', data, { timeout: 300000 }) // 5分钟超时
+    return autoMiningApi.startTask(data)
   },
 
   // 获取挖掘状态
   getMiningStatus(taskId: string) {
-    return request.get(`/mining/status/${taskId}`, { timeout: 300000 }) // 5分钟超时
+    return autoMiningApi.getTaskStatus(taskId)
   },
 
   // 获取挖掘结果
   getMiningResults(taskId: string) {
-    return request.get(`/mining/results/${taskId}`, { timeout: 300000 }) // 5分钟超时
+    return autoMiningApi.getTaskResult(taskId)
   }
 }
 

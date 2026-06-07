@@ -16,6 +16,7 @@ import {
   Tag,
   Spin,
   Alert,
+  Tabs,
 } from "antd";
 import {
   PlayCircleOutlined,
@@ -27,6 +28,7 @@ import {
 } from "@ant-design/icons";
 import * as echarts from "echarts";
 import { api } from "@/services/api";
+import { autoMiningApi } from "@/services/autoMining";
 import dayjs from "dayjs";
 import "./FactorMining.css";
 
@@ -77,6 +79,7 @@ interface MiningResult {
 
 const FactorMining: React.FC = () => {
   const [form] = Form.useForm();
+  const [activeTab, setActiveTab] = useState<"manual" | "auto">("manual");
   const evolutionChartRef = useRef<HTMLDivElement>(null);
   const resultChartRef = useRef<HTMLDivElement>(null);
   const chartInstanceRef = useRef<echarts.ECharts | null>(null);
@@ -177,7 +180,7 @@ const FactorMining: React.FC = () => {
       setElapsedTime(0); // 重置计时器
       setSavedFactorNames(new Set()); // 新挖掘时清除记录
 
-      const response = (await api.startGeneticMining(requestData)) as any;
+      const response = (await autoMiningApi.startTask(requestData)) as any;
 
       if (response.success) {
         const newTaskId = response.data.task_id;
@@ -214,7 +217,7 @@ const FactorMining: React.FC = () => {
   // 检查挖掘进度
   const checkMiningProgress = async (currentTaskId: string) => {
     try {
-      const response = (await api.getMiningStatus(currentTaskId)) as any;
+      const response = (await autoMiningApi.getTaskStatus(currentTaskId)) as any;
 
       if (response.success) {
         const statusData = response.data as MiningStatus;
@@ -307,7 +310,7 @@ const FactorMining: React.FC = () => {
   const getMiningResults = async (currentTaskId: string) => {
     try {
       console.log("Fetching mining results for task:", currentTaskId);
-      const response = (await api.getMiningResults(currentTaskId)) as any;
+      const response = (await autoMiningApi.getTaskResult(currentTaskId)) as any;
 
       if (response.success) {
         console.log("Mining results received:", response.data);
@@ -774,6 +777,548 @@ const FactorMining: React.FC = () => {
     }
   };
 
+  const manualMiningContent = (
+    <Row gutter={[24, 24]}>
+      <Col xs={24} lg={8}>
+        <Card title="遗传算法配置" className="config-card">
+          <Form form={form} layout="vertical" onFinish={startMining}>
+            <Divider
+              styles={{ content: { margin: 0 } }}
+              titlePlacement="left"
+            >
+              基础配置
+            </Divider>
+
+            <Form.Item
+              label="股票代码"
+              name="stock_code"
+              initialValue="000001"
+              rules={[{ required: true, message: "请输入股票代码" }]}
+            >
+              <Input placeholder="例如：000001、600000" />
+            </Form.Item>
+
+            <Form.Item
+              label="日期范围"
+              name="dateRange"
+              rules={[{ required: true, message: "请选择日期范围" }]}
+            >
+              <RangePicker style={{ width: "100%" }} />
+            </Form.Item>
+
+            <Divider
+              styles={{ content: { margin: 0 } }}
+              titlePlacement="left"
+            >
+              基础因子选择
+            </Divider>
+            <p className="text-hint">
+              选择作为遗传算法输入的基础因子（可搜索因子名称）
+            </p>
+
+            <Form.Item
+              name="base_factors"
+              rules={[{ required: true, message: "请至少选择一个基础因子" }]}
+            >
+              <Select
+                mode="multiple"
+                placeholder="输入因子名称搜索，如：RSI、MACD、SMA"
+                style={{ width: "100%" }}
+                showSearch
+                filterOption={(input, option) => {
+                  const label = String(option?.label ?? "");
+                  const value = String(option?.value ?? "");
+                  return (
+                    label.toLowerCase().includes(input.toLowerCase()) ||
+                    value.toLowerCase().includes(input.toLowerCase())
+                  );
+                }}
+                optionLabelProp="label"
+                maxTagCount="responsive"
+                size="large"
+                popupClassName="factor-select-dropdown"
+                listHeight={400}
+              >
+                {factors.map((factor) => (
+                  <Option
+                    key={factor.id}
+                    value={factor.name}
+                    label={factor.name}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 4,
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                        }}
+                      >
+                        <span style={{ fontWeight: 500 }}>{factor.name}</span>
+                        <Tag
+                          color={
+                            factor.source === "preset" ? "success" : "warning"
+                          }
+                        >
+                          {factor.source === "preset" ? "预置" : "自定义"}
+                        </Tag>
+                        <Tag color="blue">{factor.category}</Tag>
+                      </div>
+                      <div
+                        style={{
+                          fontSize: 12,
+                          color: "#64748b",
+                          fontFamily: "monospace",
+                        }}
+                      >
+                        {factor.code}
+                      </div>
+                      {factor.description && (
+                        <div style={{ fontSize: 12, color: "#94a3b8" }}>
+                          {factor.description}
+                        </div>
+                      )}
+                    </div>
+                  </Option>
+                ))}
+              </Select>
+            </Form.Item>
+
+            <Form.Item noStyle shouldUpdate>
+              {() => {
+                const selectedCount =
+                  form.getFieldValue("base_factors")?.length || 0;
+                return (
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      marginBottom: 16,
+                    }}
+                  >
+                    <span className="text-hint">
+                      已选择 <strong style={{ color: "#3b82f6" }}>{selectedCount}</strong> 个因子
+                    </span>
+                    <Space size="small">
+                      <Button
+                        type="link"
+                        size="small"
+                        onClick={() => {
+                          form.setFieldsValue({
+                            base_factors: factors.map((f) => f.name),
+                          });
+                        }}
+                      >
+                        全选
+                      </Button>
+                      <Button
+                        type="link"
+                        size="small"
+                        onClick={() => {
+                          form.setFieldsValue({ base_factors: [] });
+                        }}
+                      >
+                        清空
+                      </Button>
+                    </Space>
+                  </div>
+                );
+              }}
+            </Form.Item>
+
+            <Divider
+              styles={{ content: { margin: 0 } }}
+              titlePlacement="left"
+            >
+              算法参数
+            </Divider>
+
+            <Row gutter={16}>
+              <Col span={12}>
+                <Form.Item
+                  label="种群大小"
+                  name="population_size"
+                  tooltip="每一代的个体数量"
+                >
+                  <InputNumber min={10} max={200} style={{ width: "100%" }} />
+                </Form.Item>
+              </Col>
+              <Col span={12}>
+                <Form.Item
+                  label="迭代次数"
+                  name="n_generations"
+                  tooltip="进化代数"
+                >
+                  <InputNumber min={1} max={100} style={{ width: "100%" }} />
+                </Form.Item>
+              </Col>
+            </Row>
+
+            <Row gutter={16}>
+              <Col span={12}>
+                <Form.Item label="变异率" name="mutation_rate">
+                  <InputNumber
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    style={{ width: "100%" }}
+                  />
+                </Form.Item>
+              </Col>
+              <Col span={12}>
+                <Form.Item label="交叉率" name="crossover_rate">
+                  <InputNumber
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    style={{ width: "100%" }}
+                  />
+                </Form.Item>
+              </Col>
+            </Row>
+
+            <Form.Item
+              label="精英保留数量"
+              name="elite_size"
+              tooltip="每代保留的最优个体数"
+            >
+              <InputNumber min={0} max={20} style={{ width: "100%" }} />
+            </Form.Item>
+
+            <Divider
+              styles={{ content: { margin: 0 } }}
+              titlePlacement="left"
+            >
+              适应度函数
+            </Divider>
+
+            <Form.Item label="优化目标" name="fitness_objective">
+              <Select>
+                <Option value="ic_mean">IC均值</Option>
+                <Option value="ir_ratio">IR比率</Option>
+                <Option value="sharpe">夏普比率</Option>
+                <Option value="combined">综合得分</Option>
+              </Select>
+            </Form.Item>
+
+            <Form.Item noStyle shouldUpdate>
+              {() => {
+                const objective =
+                  form.getFieldValue("fitness_objective") || "ic_mean";
+
+                let thresholdLabel = "阈值";
+                let thresholdPlaceholder = "0.03";
+
+                if (objective === "ic_mean") {
+                  thresholdLabel = "IC阈值";
+                  thresholdPlaceholder = "例如：0.03";
+                } else if (objective === "ir_ratio") {
+                  thresholdLabel = "IR阈值";
+                  thresholdPlaceholder = "例如：0.5";
+                } else if (objective === "sharpe") {
+                  thresholdLabel = "夏普阈值";
+                  thresholdPlaceholder = "例如：1.0";
+                } else if (objective === "combined") {
+                  thresholdLabel = "综合阈值";
+                  thresholdPlaceholder = "例如：0.5";
+                }
+
+                return (
+                  <Form.Item
+                    label={thresholdLabel}
+                    name="ic_threshold"
+                    tooltip={`筛选因子的${thresholdLabel}`}
+                  >
+                    <InputNumber
+                      min={0}
+                      step={0.01}
+                      style={{ width: "100%" }}
+                      placeholder={thresholdPlaceholder}
+                    />
+                  </Form.Item>
+                );
+              }}
+            </Form.Item>
+
+            <Form.Item>
+              <Button
+                type="primary"
+                htmlType="submit"
+                icon={<PlayCircleOutlined />}
+                loading={loading}
+                block
+                size="large"
+                disabled={mining}
+              >
+                {mining ? "挖掘中..." : "开始挖掘"}
+              </Button>
+            </Form.Item>
+          </Form>
+        </Card>
+      </Col>
+
+      <Col xs={24} lg={16}>
+        <Card title="挖掘结果" className="result-card">
+          {!mining && !miningStatus && !miningResult && (
+            <div className="placeholder-content">
+              <BarChartOutlined className="placeholder-icon" />
+              <p className="placeholder-text">配置参数后点击"开始挖掘"按钮</p>
+              <p className="placeholder-hint">
+                遗传算法将自动搜索最优因子表达式
+              </p>
+            </div>
+          )}
+
+          {(mining || miningStatus) && !miningResult && (
+            <div className="mining-progress">
+              {mining && (
+                <Alert
+                  message={
+                    <Space>
+                      <SyncOutlined spin />
+                      <span>挖掘进行中...</span>
+                      <ClockCircleOutlined />
+                      <span style={{ color: "#64748b" }}>
+                        已用时: {formatElapsedTime(elapsedTime)}
+                      </span>
+                    </Space>
+                  }
+                  type="info"
+                  showIcon={false}
+                  style={{
+                    marginBottom: 16,
+                    background: "rgba(59, 130, 246, 0.1)",
+                    border: "1px solid rgba(59, 130, 246, 0.2)",
+                  }}
+                />
+              )}
+
+              {miningStatus && (
+                <>
+                  <div className="progress-section">
+                    <div className="progress-header">
+                      <span className="progress-label">挖掘进度</span>
+                      <span className="progress-value">
+                        {getProgressPercent()}%
+                      </span>
+                    </div>
+                    <Progress
+                      percent={getProgressPercent()}
+                      status={mining ? "active" : "success"}
+                      strokeColor={{
+                        "0%": "#3b82f6",
+                        "100%": "#22c55e",
+                      }}
+                    />
+                  </div>
+
+                  <Row gutter={16} style={{ marginTop: 24 }}>
+                    <Col span={8}>
+                      <div className="stat-item">
+                        <p className="stat-label">当前代数</p>
+                        <p className="stat-value">
+                          {miningStatus.current_generation}/
+                          {miningStatus.total_generations}
+                        </p>
+                      </div>
+                    </Col>
+                    <Col span={8}>
+                      <div className="stat-item">
+                        <p className="stat-label">最优适应度</p>
+                        <p className="stat-value stat-primary">
+                          {miningStatus.best_fitness?.toFixed(4) || "-"}
+                        </p>
+                      </div>
+                    </Col>
+                    <Col span={8}>
+                      <div className="stat-item">
+                        <p className="stat-label">平均适应度</p>
+                        <p className="stat-value">
+                          {miningStatus.avg_fitness?.toFixed(4) || "-"}
+                        </p>
+                      </div>
+                    </Col>
+                  </Row>
+                </>
+              )}
+
+              {mining && !miningStatus && (
+                <div
+                  style={{
+                    textAlign: "center",
+                    padding: "40px 0",
+                    color: "#64748b",
+                  }}
+                >
+                  <Spin size="large" />
+                  <p style={{ marginTop: 16 }}>正在执行挖掘任务...</p>
+                </div>
+              )}
+
+              {miningStatus && (
+                <div className="chart-section" style={{ marginTop: 24 }}>
+                  <h4 className="chart-title">进化曲线（实时）</h4>
+                  <div
+                    ref={evolutionChartRef}
+                    className="chart-container"
+                    style={{ height: "300px" }}
+                  ></div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {miningStatus &&
+            miningStatus.status === "completed" &&
+            !miningResult && (
+              <div style={{ textAlign: "center", padding: "24px" }}>
+                <Spin size="large" tip="正在加载挖掘结果..." />
+              </div>
+            )}
+
+          {miningResult && (
+            <div className="mining-result">
+              <div className="result-summary" style={{ marginBottom: 24 }}>
+                <Row gutter={16}>
+                  <Col span={8}>
+                    <div className="stat-item">
+                      <p className="stat-label">总代数</p>
+                      <p className="stat-value">{miningResult.generations}</p>
+                    </div>
+                  </Col>
+                  <Col span={8}>
+                    <div className="stat-item">
+                      <p className="stat-label">最优适应度</p>
+                      <p className="stat-value stat-primary">
+                        {miningResult.best_fitness?.toFixed(4)}
+                      </p>
+                    </div>
+                  </Col>
+                  <Col span={8}>
+                    <div className="stat-item">
+                      <p className="stat-label">发现因子数</p>
+                      <p className="stat-value">
+                        {miningResult.factors?.length || 0}
+                      </p>
+                    </div>
+                  </Col>
+                </Row>
+              </div>
+
+              <div className="chart-section" style={{ marginBottom: 24 }}>
+                <h4 className="chart-title">完整进化曲线</h4>
+                <div
+                  ref={resultChartRef}
+                  className="chart-container"
+                  style={{ height: "300px" }}
+                ></div>
+              </div>
+
+              <Divider />
+
+              <h3 className="result-title">发现的因子</h3>
+
+              {!miningResult.factors || miningResult.factors.length === 0 ? (
+                <Alert
+                  message="未发现符合条件的因子"
+                  type="info"
+                  showIcon
+                  style={{ marginTop: 16 }}
+                />
+              ) : (
+                <div className="factors-list">
+                  {miningResult.factors.map((factor, index) => (
+                    <Card key={index} className="factor-card" size="small">
+                      <div className="factor-header">
+                        <div className="factor-info">
+                          <Space>
+                            <Tag color="blue">Top {index + 1}</Tag>
+                            <span className="factor-name">
+                              {factor.name || `Factor_${index + 1}`}
+                            </span>
+                          </Space>
+                          <div className="factor-expression">
+                            {factor.expression}
+                          </div>
+                        </div>
+                        <div className="factor-stats">
+                          <div className="stat-row">
+                            <span className="stat-label">IC:</span>
+                            <span
+                              className={`stat-value ${factor.ic > 0 ? "positive" : "negative"}`}
+                            >
+                              {factor.ic?.toFixed(4)}
+                            </span>
+                          </div>
+                          <div className="stat-row">
+                            <span className="stat-label">IR:</span>
+                            <span
+                              className={`stat-value ${factor.ir > 0 ? "positive" : "negative"}`}
+                            >
+                              {factor.ir?.toFixed(4)}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="factor-actions">
+                        <Button
+                          type="primary"
+                          size="small"
+                          icon={<SaveOutlined />}
+                          onClick={() => saveFactor(factor, index)}
+                        >
+                          保存到因子库
+                        </Button>
+                      </div>
+                    </Card>
+                  ))}
+                </div>
+              )}
+
+              <div className="result-actions" style={{ marginTop: 24 }}>
+                <Space>
+                  <Button
+                    type="primary"
+                    icon={<SaveOutlined />}
+                    onClick={saveAllFactors}
+                  >
+                    全部保存到因子库
+                  </Button>
+                </Space>
+              </div>
+            </div>
+          )}
+        </Card>
+      </Col>
+    </Row>
+  );
+
+  const autoMiningContent = (
+    <Card className="result-card">
+      <Space direction="vertical" size={16} style={{ width: "100%" }}>
+        <Alert
+          type="info"
+          showIcon
+          message="自动挖掘入口迁移中"
+          description="本批先完成 QuantGPT 风格的 API 封装落点，以及页面 Tab 结构对齐。下一批将接入真实 task 提交、状态轮询和候选展示。"
+        />
+        <div className="placeholder-content" style={{ padding: "24px 0" }}>
+          <RocketOutlined className="placeholder-icon" />
+          <p className="placeholder-text">自动挖掘 Tab 已就位</p>
+          <p className="placeholder-hint">
+            后续会以 QuantGPT 的异步 task 流程为准，逐步迁入提交、状态、候选结果与迭代动作。
+          </p>
+        </div>
+      </Space>
+    </Card>
+  );
+
   return (
     <div className="factor-mining-container">
       {/* 背景 */}
@@ -787,570 +1332,27 @@ const FactorMining: React.FC = () => {
             <div>
               <h1 className="page-title">因子挖掘</h1>
               <p className="page-subtitle">
-                使用遗传算法自动发现最优因子表达式
+                以 QuantGPT 的真实任务流为准，逐步迁移 auto mining 能力
               </p>
             </div>
           </div>
         </div>
-
-        <Row gutter={[24, 24]}>
-          {/* 左侧配置面板 */}
-          <Col xs={24} lg={8}>
-            <Card title="遗传算法配置" className="config-card">
-              <Form form={form} layout="vertical" onFinish={startMining}>
-                {/* 基础配置 */}
-                <Divider
-                  styles={{ content: { margin: 0 } }}
-                  titlePlacement="left"
-                >
-                  基础配置
-                </Divider>
-
-                <Form.Item
-                  label="股票代码"
-                  name="stock_code"
-                  initialValue="000001"
-                  rules={[{ required: true, message: "请输入股票代码" }]}
-                >
-                  <Input placeholder="例如：000001、600000" />
-                </Form.Item>
-
-                <Form.Item
-                  label="日期范围"
-                  name="dateRange"
-                  rules={[{ required: true, message: "请选择日期范围" }]}
-                >
-                  <RangePicker style={{ width: "100%" }} />
-                </Form.Item>
-
-                {/* 基础因子选择 */}
-                <Divider
-                  styles={{ content: { margin: 0 } }}
-                  titlePlacement="left"
-                >
-                  基础因子选择
-                </Divider>
-                <p className="text-hint">
-                  选择作为遗传算法输入的基础因子（可搜索因子名称）
-                </p>
-
-                <Form.Item
-                  name="base_factors"
-                  rules={[
-                    { required: true, message: "请至少选择一个基础因子" },
-                  ]}
-                >
-                  <Select
-                    mode="multiple"
-                    placeholder="输入因子名称搜索，如：RSI、MACD、SMA"
-                    style={{ width: "100%" }}
-                    showSearch
-                    filterOption={(input, option) => {
-                      const label = String(option?.label ?? "");
-                      const value = String(option?.value ?? "");
-                      return (
-                        label.toLowerCase().includes(input.toLowerCase()) ||
-                        value.toLowerCase().includes(input.toLowerCase())
-                      );
-                    }}
-                    optionLabelProp="label"
-                    maxTagCount="responsive"
-                    size="large"
-                    popupClassName="factor-select-dropdown"
-                    listHeight={400}
-                  >
-                    {factors.map((factor) => (
-                      <Option
-                        key={factor.id}
-                        value={factor.name}
-                        label={factor.name}
-                      >
-                        <div
-                          style={{
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: 4,
-                          }}
-                        >
-                          <div
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              gap: 8,
-                            }}
-                          >
-                            <span style={{ fontWeight: 500 }}>
-                              {factor.name}
-                            </span>
-                            <Tag
-                              color={
-                                factor.source === "preset"
-                                  ? "success"
-                                  : "warning"
-                              }
-                            >
-                              {factor.source === "preset" ? "预置" : "自定义"}
-                            </Tag>
-                            <Tag color="blue">{factor.category}</Tag>
-                          </div>
-                          <div
-                            style={{
-                              fontSize: 12,
-                              color: "#64748b",
-                              fontFamily: "monospace",
-                            }}
-                          >
-                            {factor.code}
-                          </div>
-                          {factor.description && (
-                            <div style={{ fontSize: 12, color: "#94a3b8" }}>
-                              {factor.description}
-                            </div>
-                          )}
-                        </div>
-                      </Option>
-                    ))}
-                  </Select>
-                </Form.Item>
-
-                <Form.Item noStyle shouldUpdate>
-                  {() => {
-                    const selectedCount =
-                      form.getFieldValue("base_factors")?.length || 0;
-                    return (
-                      <div
-                        style={{
-                          display: "flex",
-                          justifyContent: "space-between",
-                          alignItems: "center",
-                          marginBottom: 16,
-                        }}
-                      >
-                        <span className="text-hint">
-                          已选择{" "}
-                          <strong style={{ color: "#3b82f6" }}>
-                            {selectedCount}
-                          </strong>{" "}
-                          个因子
-                        </span>
-                        <Space size="small">
-                          <Button
-                            type="link"
-                            size="small"
-                            onClick={() => {
-                              form.setFieldsValue({
-                                base_factors: factors.map((f) => f.name),
-                              });
-                            }}
-                          >
-                            全选
-                          </Button>
-                          <Button
-                            type="link"
-                            size="small"
-                            onClick={() => {
-                              form.setFieldsValue({ base_factors: [] });
-                            }}
-                          >
-                            清空
-                          </Button>
-                        </Space>
-                      </div>
-                    );
-                  }}
-                </Form.Item>
-
-                {/* 算法参数 */}
-                <Divider
-                  styles={{ content: { margin: 0 } }}
-                  titlePlacement="left"
-                >
-                  算法参数
-                </Divider>
-
-                <Row gutter={16}>
-                  <Col span={12}>
-                    <Form.Item
-                      label="种群大小"
-                      name="population_size"
-                      tooltip="每一代的个体数量"
-                    >
-                      <InputNumber
-                        min={10}
-                        max={200}
-                        style={{ width: "100%" }}
-                      />
-                    </Form.Item>
-                  </Col>
-                  <Col span={12}>
-                    <Form.Item
-                      label="迭代次数"
-                      name="n_generations"
-                      tooltip="进化代数"
-                    >
-                      <InputNumber
-                        min={1}
-                        max={100}
-                        style={{ width: "100%" }}
-                      />
-                    </Form.Item>
-                  </Col>
-                </Row>
-
-                <Row gutter={16}>
-                  <Col span={12}>
-                    <Form.Item label="变异率" name="mutation_rate">
-                      <InputNumber
-                        min={0}
-                        max={1}
-                        step={0.05}
-                        style={{ width: "100%" }}
-                      />
-                    </Form.Item>
-                  </Col>
-                  <Col span={12}>
-                    <Form.Item label="交叉率" name="crossover_rate">
-                      <InputNumber
-                        min={0}
-                        max={1}
-                        step={0.05}
-                        style={{ width: "100%" }}
-                      />
-                    </Form.Item>
-                  </Col>
-                </Row>
-
-                <Form.Item
-                  label="精英保留数量"
-                  name="elite_size"
-                  tooltip="每代保留的最优个体数"
-                >
-                  <InputNumber min={0} max={20} style={{ width: "100%" }} />
-                </Form.Item>
-
-                {/* 适应度函数 */}
-                <Divider
-                  styles={{ content: { margin: 0 } }}
-                  titlePlacement="left"
-                >
-                  适应度函数
-                </Divider>
-
-                <Form.Item label="优化目标" name="fitness_objective">
-                  <Select>
-                    <Option value="ic_mean">IC均值</Option>
-                    <Option value="ir_ratio">IR比率</Option>
-                    <Option value="sharpe">夏普比率</Option>
-                    <Option value="combined">综合得分</Option>
-                  </Select>
-                </Form.Item>
-
-                <Form.Item noStyle shouldUpdate>
-                  {() => {
-                    const objective =
-                      form.getFieldValue("fitness_objective") || "ic_mean";
-
-                    let thresholdLabel = "阈值";
-                    let thresholdPlaceholder = "0.03";
-
-                    if (objective === "ic_mean") {
-                      thresholdLabel = "IC阈值";
-                      thresholdPlaceholder = "例如：0.03";
-                    } else if (objective === "ir_ratio") {
-                      thresholdLabel = "IR阈值";
-                      thresholdPlaceholder = "例如：0.5";
-                    } else if (objective === "sharpe") {
-                      thresholdLabel = "夏普阈值";
-                      thresholdPlaceholder = "例如：1.0";
-                    } else if (objective === "combined") {
-                      thresholdLabel = "综合阈值";
-                      thresholdPlaceholder = "例如：0.5";
-                    }
-
-                    return (
-                      <Form.Item
-                        label={thresholdLabel}
-                        name="ic_threshold"
-                        tooltip={`筛选因子的${thresholdLabel}`}
-                      >
-                        <InputNumber
-                          min={0}
-                          step={0.01}
-                          style={{ width: "100%" }}
-                          placeholder={thresholdPlaceholder}
-                        />
-                      </Form.Item>
-                    );
-                  }}
-                </Form.Item>
-
-                <Form.Item>
-                  <Button
-                    type="primary"
-                    htmlType="submit"
-                    icon={<PlayCircleOutlined />}
-                    loading={loading}
-                    block
-                    size="large"
-                    disabled={mining}
-                  >
-                    {mining ? "挖掘中..." : "开始挖掘"}
-                  </Button>
-                </Form.Item>
-              </Form>
-            </Card>
-          </Col>
-
-          {/* 右侧结果展示 */}
-          <Col xs={24} lg={16}>
-            <Card title="挖掘结果" className="result-card">
-              {/* 等待提示 */}
-              {!mining && !miningStatus && !miningResult && (
-                <div className="placeholder-content">
-                  <BarChartOutlined className="placeholder-icon" />
-                  <p className="placeholder-text">
-                    配置参数后点击"开始挖掘"按钮
-                  </p>
-                  <p className="placeholder-hint">
-                    遗传算法将自动搜索最优因子表达式
-                  </p>
-                </div>
-              )}
-
-              {/* 挖掘进度和完成状态 */}
-              {(mining || miningStatus) && !miningResult && (
-                <div className="mining-progress">
-                  {/* 挖掘状态提示 */}
-                  {mining && (
-                    <Alert
-                      message={
-                        <Space>
-                          <SyncOutlined spin />
-                          <span>挖掘进行中...</span>
-                          <ClockCircleOutlined />
-                          <span style={{ color: "#64748b" }}>
-                            已用时: {formatElapsedTime(elapsedTime)}
-                          </span>
-                        </Space>
-                      }
-                      type="info"
-                      showIcon={false}
-                      style={{
-                        marginBottom: 16,
-                        background: "rgba(59, 130, 246, 0.1)",
-                        border: "1px solid rgba(59, 130, 246, 0.2)",
-                      }}
-                    />
-                  )}
-
-                  {/* 进度条和统计信息 - 只有当有 miningStatus 时才显示 */}
-                  {miningStatus && (
-                    <>
-                      <div className="progress-section">
-                        <div className="progress-header">
-                          <span className="progress-label">挖掘进度</span>
-                          <span className="progress-value">
-                            {getProgressPercent()}%
-                          </span>
-                        </div>
-                        <Progress
-                          percent={getProgressPercent()}
-                          status={mining ? "active" : "success"}
-                          strokeColor={{
-                            "0%": "#3b82f6",
-                            "100%": "#22c55e",
-                          }}
-                        />
-                      </div>
-
-                      <Row gutter={16} style={{ marginTop: 24 }}>
-                        <Col span={8}>
-                          <div className="stat-item">
-                            <p className="stat-label">当前代数</p>
-                            <p className="stat-value">
-                              {miningStatus.current_generation}/
-                              {miningStatus.total_generations}
-                            </p>
-                          </div>
-                        </Col>
-                        <Col span={8}>
-                          <div className="stat-item">
-                            <p className="stat-label">最优适应度</p>
-                            <p className="stat-value stat-primary">
-                              {miningStatus.best_fitness?.toFixed(4) || "-"}
-                            </p>
-                          </div>
-                        </Col>
-                        <Col span={8}>
-                          <div className="stat-item">
-                            <p className="stat-label">平均适应度</p>
-                            <p className="stat-value">
-                              {miningStatus.avg_fitness?.toFixed(4) || "-"}
-                            </p>
-                          </div>
-                        </Col>
-                      </Row>
-                    </>
-                  )}
-
-                  {/* 如果正在挖掘但还没有状态数据，显示加载提示 */}
-                  {mining && !miningStatus && (
-                    <div
-                      style={{
-                        textAlign: "center",
-                        padding: "40px 0",
-                        color: "#64748b",
-                      }}
-                    >
-                      <Spin size="large" />
-                      <p style={{ marginTop: 16 }}>正在执行挖掘任务...</p>
-                    </div>
-                  )}
-
-                  {/* 进化曲线图表 - 只有当有数据时才显示 */}
-                  {miningStatus && (
-                    <div className="chart-section" style={{ marginTop: 24 }}>
-                      <h4 className="chart-title">进化曲线（实时）</h4>
-                      <div
-                        ref={evolutionChartRef}
-                        className="chart-container"
-                        style={{ height: "300px" }}
-                      ></div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* 挖掘完成提示 */}
-              {miningStatus &&
-                miningStatus.status === "completed" &&
-                !miningResult && (
-                  <div style={{ textAlign: "center", padding: "24px" }}>
-                    <Spin size="large" tip="正在加载挖掘结果..." />
-                  </div>
-                )}
-
-              {/* 最终结果 */}
-              {miningResult && (
-                <div className="mining-result">
-                  {/* 挖掘摘要 */}
-                  <div className="result-summary" style={{ marginBottom: 24 }}>
-                    <Row gutter={16}>
-                      <Col span={8}>
-                        <div className="stat-item">
-                          <p className="stat-label">总代数</p>
-                          <p className="stat-value">
-                            {miningResult.generations}
-                          </p>
-                        </div>
-                      </Col>
-                      <Col span={8}>
-                        <div className="stat-item">
-                          <p className="stat-label">最优适应度</p>
-                          <p className="stat-value stat-primary">
-                            {miningResult.best_fitness?.toFixed(4)}
-                          </p>
-                        </div>
-                      </Col>
-                      <Col span={8}>
-                        <div className="stat-item">
-                          <p className="stat-label">发现因子数</p>
-                          <p className="stat-value">
-                            {miningResult.factors?.length || 0}
-                          </p>
-                        </div>
-                      </Col>
-                    </Row>
-                  </div>
-
-                  {/* 最终进化曲线 */}
-                  <div className="chart-section" style={{ marginBottom: 24 }}>
-                    <h4 className="chart-title">完整进化曲线</h4>
-                    <div
-                      ref={resultChartRef}
-                      className="chart-container"
-                      style={{ height: "300px" }}
-                    ></div>
-                  </div>
-
-                  <Divider />
-
-                  <h3 className="result-title">发现的因子</h3>
-
-                  {!miningResult.factors ||
-                  miningResult.factors.length === 0 ? (
-                    <Alert
-                      message="未发现符合条件的因子"
-                      type="info"
-                      showIcon
-                      style={{ marginTop: 16 }}
-                    />
-                  ) : (
-                    <div className="factors-list">
-                      {miningResult.factors.map((factor, index) => (
-                        <Card key={index} className="factor-card" size="small">
-                          <div className="factor-header">
-                            <div className="factor-info">
-                              <Space>
-                                <Tag color="blue">Top {index + 1}</Tag>
-                                <span className="factor-name">
-                                  {factor.name || `Factor_${index + 1}`}
-                                </span>
-                              </Space>
-                              <div className="factor-expression">
-                                {factor.expression}
-                              </div>
-                            </div>
-                            <div className="factor-stats">
-                              <div className="stat-row">
-                                <span className="stat-label">IC:</span>
-                                <span
-                                  className={`stat-value ${factor.ic > 0 ? "positive" : "negative"}`}
-                                >
-                                  {factor.ic?.toFixed(4)}
-                                </span>
-                              </div>
-                              <div className="stat-row">
-                                <span className="stat-label">IR:</span>
-                                <span
-                                  className={`stat-value ${factor.ir > 0 ? "positive" : "negative"}`}
-                                >
-                                  {factor.ir?.toFixed(4)}
-                                </span>
-                              </div>
-                            </div>
-                          </div>
-                          <div className="factor-actions">
-                            <Button
-                              type="primary"
-                              size="small"
-                              icon={<SaveOutlined />}
-                              onClick={() => saveFactor(factor, index)}
-                            >
-                              保存到因子库
-                            </Button>
-                          </div>
-                        </Card>
-                      ))}
-                    </div>
-                  )}
-
-                  <div className="result-actions" style={{ marginTop: 24 }}>
-                    <Space>
-                      <Button
-                        type="primary"
-                        icon={<SaveOutlined />}
-                        onClick={saveAllFactors}
-                      >
-                        全部保存到因子库
-                      </Button>
-                    </Space>
-                  </div>
-                </div>
-              )}
-            </Card>
-          </Col>
-        </Row>
+        <Tabs
+          activeKey={activeTab}
+          onChange={(key) => setActiveTab(key as "manual" | "auto")}
+          items={[
+            {
+              key: "manual",
+              label: "手动挖掘",
+              children: manualMiningContent,
+            },
+            {
+              key: "auto",
+              label: "自动挖掘",
+              children: autoMiningContent,
+            },
+          ]}
+        />
       </div>
     </div>
   );
