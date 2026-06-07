@@ -84,7 +84,7 @@ async def _run_genetic_mining(task_id: str, request: GeneticMiningRequest):
         from backend.services.factor_service import factor_service
         from backend.repositories.factor_repository import FactorRepository
         from backend.core.database import get_db_session
-        from backend.services.data_service import data_service
+        from backend.data.service import data_service
 
         # 更新状态
         mining_tasks[task_id]["status"] = "running"

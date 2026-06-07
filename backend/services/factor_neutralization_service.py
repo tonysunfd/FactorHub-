@@ -6,7 +6,7 @@ import numpy as np
 from typing import Dict, List, Optional
 from sklearn.linear_model import LinearRegression
 
-from backend.services.data_service import data_service
+from backend.data.enrichment import market_data_enrichment_service
 
 
 class FactorNeutralizationService:
@@ -146,7 +146,7 @@ class FactorNeutralizationService:
 
     def get_industry_classification(self, stock_codes: List[str]) -> Dict[str, str]:
         """
-        获取股票的行业分类（简化版，使用申万一级分类）
+        获取股票的行业分类，优先使用 baostock 的真实行业信息。
 
         Args:
             stock_codes: 股票代码列表
@@ -154,22 +154,16 @@ class FactorNeutralizationService:
         Returns:
             股票代码到行业的映射字典
         """
-        # 这里使用简化的行业分类
-        # 实际应用中应该从数据源获取准确的分类
+        normalized_codes = [self._normalize_stock_code(code) for code in stock_codes]
+        industry_df = market_data_enrichment_service.get_industry_data(normalized_codes)
+        if industry_df is not None and not industry_df.empty:
+            raw_map = dict(zip(industry_df["stock_code"], industry_df["industry"]))
+            result: Dict[str, str] = {}
+            for original, normalized in zip(stock_codes, normalized_codes):
+                result[original] = raw_map.get(normalized, self._fallback_industry(original))
+            return result
 
-        # 简化版行业分类（按股票代码前缀）
-        industry_map = {}
-        for code in stock_codes:
-            if code.startswith("6"):
-                # 上海主板
-                industry_map[code] = "main_board_sh"
-            elif code.startswith("0") or code.startswith("3"):
-                # 深圳主板/创业板
-                industry_map[code] = "main_board_sz"
-            else:
-                industry_map[code] = "other"
-
-        return industry_map
+        return {code: self._fallback_industry(code) for code in stock_codes}
 
     def add_industry_classification(
         self,
@@ -201,6 +195,30 @@ class FactorNeutralizationService:
             result["industry"] = "unknown"
 
         return result
+
+    def _normalize_stock_code(self, code: str) -> str:
+        """统一为 baostock 代码格式。"""
+        stripped = code.strip()
+        if stripped.startswith(("sh.", "sz.")):
+            return stripped
+        if stripped.endswith(".SH"):
+            return f"sh.{stripped[:-3]}"
+        if stripped.endswith(".SZ"):
+            return f"sz.{stripped[:-3]}"
+        if stripped.startswith("6"):
+            return f"sh.{stripped}"
+        if stripped.startswith(("0", "3")):
+            return f"sz.{stripped}"
+        return stripped
+
+    def _fallback_industry(self, code: str) -> str:
+        """baostock 不可用时的兜底行业分类。"""
+        stripped = code.replace("sh.", "").replace("sz.", "").replace(".SH", "").replace(".SZ", "")
+        if stripped.startswith("6"):
+            return "main_board_sh"
+        if stripped.startswith(("0", "3")):
+            return "main_board_sz"
+        return "other"
 
 
 # 全局因子中性化服务实例

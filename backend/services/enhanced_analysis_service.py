@@ -6,9 +6,14 @@ import numpy as np
 from typing import Dict, List, Optional, Any
 from scipy import stats
 
-from backend.services.factor_neutralization_service import factor_neutralization_service
 from backend.services.factor_stability_service import factor_stability_service
 from backend.services.factor_summary_service import factor_summary_service
+
+
+def _get_factor_neutralization_service():
+    """按需获取中性化服务，减少模块导入期耦合。"""
+    from backend.services.factor_neutralization_service import factor_neutralization_service
+    return factor_neutralization_service
 
 
 class EnhancedAnalysisService:
@@ -140,7 +145,7 @@ class EnhancedAnalysisService:
             if enable_neutralization:
                 try:
                     # 市值中性化
-                    mc_neutralized = factor_neutralization_service.neutralize_market_cap(
+                    mc_neutralized = _get_factor_neutralization_service().neutralize_market_cap(
                         df, factor_name, "market_cap"
                     )
 
@@ -155,7 +160,7 @@ class EnhancedAnalysisService:
                         }
 
                     # 行业中性化
-                    industry_neutralized = factor_neutralization_service.neutralize_industry(
+                    industry_neutralized = _get_factor_neutralization_service().neutralize_industry(
                         df, factor_name, "industry"
                     )
 

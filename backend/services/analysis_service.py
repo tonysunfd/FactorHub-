@@ -26,7 +26,12 @@ from backend.core.settings import settings
 from backend.core.database import get_db_session
 from backend.repositories.factor_repository import AnalysisCacheRepository
 from backend.models.factor import AnalysisCacheModel
-from backend.services.factor_service import factor_service
+
+
+def _get_factor_service():
+    """按需获取因子服务，避免分析模块导入时触发重初始化。"""
+    from backend.services.factor_service import get_factor_service
+    return get_factor_service()
 
 
 class AnalysisService:
@@ -151,7 +156,7 @@ class AnalysisService:
         cache_key = self._generate_cache_key(stock_codes, factor_names, start_date, end_date)
 
         # 计算因子数据（始终需要，因为缓存不包含原始数据）
-        factor_data = factor_service.calculate_factors_for_stocks(
+        factor_data = _get_factor_service().calculate_factors_for_stocks(
             stock_codes, factor_names, start_date, end_date, rolling_window
         )
 

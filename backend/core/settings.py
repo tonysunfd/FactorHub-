@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     # akshare 配置
     AKSHARE_CACHE_ENABLED: bool = True
     AKSHARE_CACHE_DIR: Path = CACHE_DIR / "akshare"
+    DATA_UNIVERSE_CACHE_DIR: Path = CACHE_DIR / "universe"
+    DATA_BENCHMARK_CACHE_DIR: Path = CACHE_DIR / "benchmark"
+    DATA_FUNDAMENTAL_CACHE_DIR: Path = CACHE_DIR / "fundamentals"
+    DATA_DIVIDEND_CACHE_DIR: Path = CACHE_DIR / "dividends"
+    DATA_INDUSTRY_CACHE_DIR: Path = CACHE_DIR / "industry"
 
     # 缓存配置
     CACHE_DEFAULT_TTL: int = 7 * 24 * 60 * 60  # 默认TTL: 7天（秒）
@@ -59,6 +64,11 @@ class Settings(BaseSettings):
         self.DB_DIR.mkdir(parents=True, exist_ok=True)
         self.REPORTS_DIR.mkdir(parents=True, exist_ok=True)
         self.AKSHARE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        self.DATA_UNIVERSE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        self.DATA_BENCHMARK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        self.DATA_FUNDAMENTAL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        self.DATA_DIVIDEND_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        self.DATA_INDUSTRY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
         # 检测数据库文件是否存在，若不存在则从样本文件复制
         db_file = self.DB_DIR / "factorflow.db"

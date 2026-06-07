@@ -13,11 +13,17 @@ from backend.core.database import get_db_session
 from backend.core.settings import settings
 from backend.models.factor import FactorModel
 from backend.repositories.factor_repository import FactorRepository
-from backend.services.data_service import data_service
+from backend.data.enrichment import ALL_SUPPORTED_VARIABLES, market_data_enrichment_service
 from backend.services.factor_version_service import factor_version_service
 
 # 配置日志
 logger = logging.getLogger(__name__)
+
+
+def _get_data_service():
+    """按需获取数据服务，避免导入期拉起重依赖。"""
+    from backend.data.service import get_data_service
+    return get_data_service()
 
 
 class FactorCalculator:
@@ -225,6 +231,47 @@ class FactorCalculator:
             "CONST": CONST,
         }
 
+    def _build_local_vars(self, df: pd.DataFrame) -> dict:
+        """构建表达式执行上下文，自动暴露 DataFrame 中的列。"""
+        local_vars = {
+            "df": df,
+            "np": np,
+            "pd": pd,
+            "int": int,
+            "float": float,
+            "bool": bool,
+            "str": str,
+            "list": list,
+            "tuple": tuple,
+            "dict": dict,
+            "set": set,
+            "len": len,
+            "range": range,
+            **self.talib_funcs,
+            **self.mylanguage_funcs,
+        }
+
+        for column in df.columns:
+            local_vars[column] = df[column]
+
+        price_aliases = {
+            "C": "close",
+            "O": "open",
+            "H": "high",
+            "L": "low",
+            "V": "volume",
+            "CLOSE": "close",
+            "OPEN": "open",
+            "HIGH": "high",
+            "LOW": "low",
+            "VOL": "volume",
+        }
+        for alias, column in price_aliases.items():
+            if column in df.columns:
+                local_vars[alias] = df[column]
+
+        return local_vars
+
     def calculate(self, df: pd.DataFrame, factor_code: str) -> pd.Series:
         """
         计算单个因子
@@ -255,10 +302,7 @@ class FactorCalculator:
                     "any": any, "all": all, "enumerate": enumerate, "zip": zip,
                     "round": round, "pow": pow, "divmod": divmod,
                 },
-                "pd": pd,
-                "np": np,
-                **self.talib_funcs,
-                **self.mylanguage_funcs,
+                **self._build_local_vars(df),
             }
 
             local_vars = {}
@@ -296,40 +340,7 @@ class FactorCalculator:
                 raise ValueError(error_msg)
         else:
             # 表达式形式：使用 eval 执行（保持向后兼容）
-            local_vars = {
-                "df": df,
-                "open": df["open"],
-                "high": df["high"],
-                "low": df["low"],
-                "close": df["close"],
-                "volume": df["volume"],
-                # 麦语言价格别名（大写）
-                "C": df["close"],  # CLOSE
-                "O": df["open"],   # OPEN
-                "H": df["high"],   # HIGH
-                "L": df["low"],    # LOW
-                "V": df["volume"], # VOLUME
-                "CLOSE": df["close"],
-                "OPEN": df["open"],
-                "HIGH": df["high"],
-                "LOW": df["low"],
-                "VOL": df["volume"],
-                # Python内置函数
-                "int": int,
-                "float": float,
-                "bool": bool,
-                "str": str,
-                "list": list,
-                "tuple": tuple,
-                "dict": dict,
-                "set": set,
-                "len": len,
-                "range": range,
-                # NumPy
-                "np": np,
-                **self.talib_funcs,
-                **self.mylanguage_funcs,
-            }
+            local_vars = self._build_local_vars(df)
 
             try:
                 # 安全措施：
@@ -911,22 +922,12 @@ class FactorService:
 
         # 获取缓存统计
         from backend.services.cache_service import cache_service
+        from backend.data.health import system_health_service
         cache_stats = cache_service.get_stats()
         stock_cache_count = cache_stats.get("total_count", 0)
-
-        # 检查AKShare健康状态
-        akshare_healthy = True
-        try:
-            import akshare as ak
-            # 使用用户指定的接口验证连接
-            stock_zh_a_daily_qfq_df = ak.stock_zh_a_daily(
-                symbol="sz000001",
-                start_date="20230903",
-                end_date="20231027",
-                adjust="qfq"
-            )
-        except Exception:
-            akshare_healthy = False
+        source_health = system_health_service.get_source_health()
+        akshare_healthy = bool(source_health.get("akshare", {}).get("healthy", False))
+        baostock_healthy = bool(source_health.get("baostock", {}).get("healthy", False))
 
         stats = {
             "preset_count": repo.get_preset_count(),
@@ -935,6 +936,8 @@ class FactorService:
             "strategy_count": 0,  # 暂时为0，后续可以根据实际情况添加
             "stock_cache_count": stock_cache_count,
             "akshare_healthy": akshare_healthy,
+            "baostock_healthy": baostock_healthy,
+            "source_health": source_health,
         }
         db.close()
         return stats
@@ -1066,6 +1069,14 @@ class FactorService:
             "low": np.linspace(9.0, 10.0, 100),
             "close": np.linspace(10.5, 11.5, 100),
             "volume": np.linspace(1000000, 1100000, 100),
+            "roe": np.linspace(0.08, 0.16, 100),
+            "net_profit": np.linspace(1.0e8, 1.8e8, 100),
+            "revenue": np.linspace(8.0e8, 1.6e9, 100),
+            "total_share": np.linspace(1.0e8, 1.2e8, 100),
+            "float_share": np.linspace(8.0e7, 9.5e7, 100),
+            "equity_multiplier": np.linspace(1.2, 2.0, 100),
+            "dividend_yield": np.linspace(0.01, 0.04, 100),
+            "market_cap": np.linspace(9.0e8, 1.4e9, 100),
         })
 
         try:
@@ -1115,7 +1126,7 @@ class FactorService:
                     suggestions = []
 
                     # 检查是否是常见变量名的拼写错误
-                    common_vars = {'close', 'open', 'high', 'low', 'volume', 'np'}
+                    common_vars = {'close', 'open', 'high', 'low', 'volume', 'np', *ALL_SUPPORTED_VARIABLES}
                     for var in common_vars:
                         if undefined_name.lower() == var.lower() or undefined_name.lower() in var:
                             suggestions.append(f"变量名：{var}")
@@ -1160,7 +1171,7 @@ class FactorService:
                     if suggestions:
                         return False, f"未定义的名称 '{undefined_name}'。您是否想使用：{', '.join(suggestions)}？"
 
-                    return False, f"未定义的名称 '{undefined_name}'，请检查拼写。常见变量名：close, open, high, low, volume"
+                    return False, f"未定义的名称 '{undefined_name}'，请检查拼写。常见变量名：close, open, high, low, volume, roe, pe, pb, ps, dividend_yield"
 
             return False, f"验证失败: {error_msg}"
 
@@ -1186,7 +1197,7 @@ class FactorService:
             包含因子值的DataFrame
         """
         # 获取股票数据
-        df = data_service.get_stock_data(stock_code, start_date, end_date)
+        df = _get_data_service().get_stock_data(stock_code, start_date, end_date)
 
         # 获取因子定义
         db = get_db_session()
@@ -1200,6 +1211,20 @@ class FactorService:
 
         if not factors:
             raise ValueError("未找到有效的因子")
+
+        expressions = [factor.code for factor in factors]
+        needed_vars = market_data_enrichment_service.detect_variables(expressions)
+        if needed_vars:
+            try:
+                df = market_data_enrichment_service.enrich_daily_data(
+                    market_df=df,
+                    stock_code=_get_data_service()._to_baostock_symbol(stock_code),
+                    start_date=start_date,
+                    end_date=end_date,
+                    needed_vars=needed_vars,
+                )
+            except Exception as exc:
+                logger.warning("为股票 %s 补充 baostock 字段失败：%s", stock_code, exc)
 
         # 计算因子
         factor_df = self.calculator.calculate_multiple(df, factors)
@@ -1241,5 +1266,23 @@ class FactorService:
         return results
 
 
-# 全局因子服务实例
-factor_service = FactorService()
+_factor_service_instance: Optional[FactorService] = None
+
+
+def get_factor_service() -> FactorService:
+    """获取惰性初始化的因子服务实例。"""
+    global _factor_service_instance
+    if _factor_service_instance is None:
+        _factor_service_instance = FactorService()
+    return _factor_service_instance
+
+
+class _LazyFactorServiceProxy:
+    """兼容旧调用方式的惰性因子服务代理。"""
+
+    def __getattr__(self, item):
+        return getattr(get_factor_service(), item)
+
+
+# 全局因子服务代理（保持向后兼容）
+factor_service = _LazyFactorServiceProxy()

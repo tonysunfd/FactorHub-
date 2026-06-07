@@ -9,8 +9,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
-
-from backend.services.portfolio_analysis_service import portfolio_analysis_service
+from backend.api.dependencies import service_attr
 
 router = APIRouter()
 
@@ -73,7 +72,7 @@ class CompareMethodsRequest(BaseModel):
 async def optimize_weights(request: OptimizeWeightsRequest):
     """优化权重"""
     try:
-        from backend.services.data_service import data_service
+        from backend.data.service import data_service
         from backend.services.factor_service import factor_service
         from backend.repositories.factor_repository import FactorRepository
         from backend.core.database import get_db_session
@@ -416,7 +415,8 @@ async def optimize_weights(request: OptimizeWeightsRequest):
 async def calculate_composite_score(request: CompositeScoreRequest):
     """计算综合得分"""
     try:
-        from backend.services.data_service import data_service
+        portfolio_analysis_service = service_attr("backend.services.portfolio_analysis_service", "portfolio_analysis_service")
+        from backend.data.service import data_service
         from backend.services.factor_service import factor_service
         from backend.repositories.factor_repository import FactorRepository
         from backend.core.database import get_db_session
@@ -493,7 +493,8 @@ async def calculate_composite_score(request: CompositeScoreRequest):
 async def compare_weight_methods(request: CompareMethodsRequest):
     """对比权重方法 - 基于IC/IR指标评估不同权重优化方法的效果"""
     try:
-        from backend.services.data_service import data_service
+        portfolio_analysis_service = service_attr("backend.services.portfolio_analysis_service", "portfolio_analysis_service")
+        from backend.data.service import data_service
         from backend.services.factor_service import factor_service
         from backend.repositories.factor_repository import FactorRepository
         from backend.core.database import get_db_session

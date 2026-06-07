@@ -8,6 +8,7 @@ import pandas as pd
 import numpy as np
 import sys
 from pathlib import Path
+from backend.api.dependencies import service_attr
 
 
 def safe_numeric_value(value):
@@ -20,14 +21,6 @@ def safe_numeric_value(value):
 
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
-
-from backend.services.analysis_service import analysis_service
-from backend.services.factor_stability_service import factor_stability_service
-from backend.services.enhanced_analysis_service import enhanced_analysis_service
-from backend.services.factor_exposure_service import factor_exposure_service
-from backend.services.factor_effectiveness_service import factor_effectiveness_service
-from backend.services.factor_attribution_service import factor_attribution_service
-from backend.services.factor_monitoring_service import factor_monitoring_service
 
 router = APIRouter()
 
@@ -76,7 +69,7 @@ async def calculate_factor(request: CalculateRequest):
     logger = logging.getLogger(__name__)
 
     try:
-        from backend.services.data_service import data_service
+        from backend.data.service import data_service
         from backend.services.factor_service import factor_service
         from backend.repositories.factor_repository import FactorRepository
         from backend.core.database import get_db_session
@@ -200,6 +193,7 @@ async def calculate_ic(request: ICAnalysisRequest):
     logger = logging.getLogger(__name__)
 
     try:
+        analysis_service = service_attr("backend.services.analysis_service", "analysis_service")
         logger.info(f"开始IC分析: {request.factor_name}, 股票: {request.stock_codes}, 时间: {request.start_date} - {request.end_date}")
 
         # 先尝试使用缓存
@@ -264,6 +258,7 @@ async def calculate_ic(request: ICAnalysisRequest):
 async def stability_test(request: StabilityRequest):
     """稳定性检验"""
     try:
+        factor_stability_service = service_attr("backend.services.factor_stability_service", "factor_stability_service")
         # 调用稳定性服务
         result = factor_stability_service.comprehensive_stability_test(
             factor_name=request.factor_name,
@@ -284,6 +279,7 @@ async def stability_test(request: StabilityRequest):
 async def multi_period_analysis(request: MultiPeriodRequest):
     """多周期分析"""
     try:
+        enhanced_analysis_service = service_attr("backend.services.enhanced_analysis_service", "enhanced_analysis_service")
         # 调用增强分析服务
         result = enhanced_analysis_service.analyze_multi_period_ic(
             factor_name=request.factor_name,
@@ -304,10 +300,11 @@ async def multi_period_analysis(request: MultiPeriodRequest):
 async def decay_analysis(request: ICAnalysisRequest):
     """因子衰减分析"""
     try:
-        from backend.services.data_service import data_service
+        from backend.data.service import data_service
         from backend.services.factor_service import factor_service
         from backend.repositories.factor_repository import FactorRepository
         from backend.core.database import get_db_session
+        factor_exposure_service = service_attr("backend.services.factor_exposure_service", "factor_exposure_service")
         import pandas as pd
         import numpy as np
 
@@ -372,10 +369,11 @@ async def exposure_analysis(request: CalculateRequest):
     logger = logging.getLogger(__name__)
 
     try:
-        from backend.services.data_service import data_service
+        from backend.data.service import data_service
         from backend.services.factor_service import factor_service
         from backend.repositories.factor_repository import FactorRepository
         from backend.core.database import get_db_session
+        factor_effectiveness_service = service_attr("backend.services.factor_effectiveness_service", "factor_effectiveness_service")
 
         logger.info(f"开始因子暴露度分析: {request.factor_name}, 股票: {request.stock_codes}")
 
@@ -425,10 +423,11 @@ async def effectiveness_analysis(request: ICAnalysisRequest):
     logger = logging.getLogger(__name__)
 
     try:
-        from backend.services.data_service import data_service
+        from backend.data.service import data_service
         from backend.services.factor_service import factor_service
         from backend.repositories.factor_repository import FactorRepository
         from backend.core.database import get_db_session
+        factor_attribution_service = service_attr("backend.services.factor_attribution_service", "factor_attribution_service")
 
         logger.info(f"开始因子有效性分析: {request.factor_name}, 股票: {request.stock_codes}")
 
@@ -478,10 +477,11 @@ async def attribution_analysis(request: ICAnalysisRequest):
     logger = logging.getLogger(__name__)
 
     try:
-        from backend.services.data_service import data_service
+        from backend.data.service import data_service
         from backend.services.factor_service import factor_service
         from backend.repositories.factor_repository import FactorRepository
         from backend.core.database import get_db_session
+        factor_monitoring_service = service_attr("backend.services.factor_monitoring_service", "factor_monitoring_service")
 
         logger.info(f"开始因子贡献度分解: {request.factor_name}, 股票: {request.stock_codes}")
 
@@ -531,7 +531,7 @@ async def monitoring_analysis(request: ICAnalysisRequest):
     logger = logging.getLogger(__name__)
 
     try:
-        from backend.services.data_service import data_service
+        from backend.data.service import data_service
         from backend.services.factor_service import factor_service
         from backend.repositories.factor_repository import FactorRepository
         from backend.core.database import get_db_session

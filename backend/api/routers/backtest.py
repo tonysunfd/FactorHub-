@@ -9,8 +9,6 @@ import numpy as np
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
-
-from backend.services.vectorbt_backtest_service import VectorBTBacktestService, check_vectorbt_available
 from backend.repositories.backtest_repository import BacktestRepository
 from backend.repositories.factor_repository import FactorRepository
 from backend.core.database import get_db_session
@@ -57,13 +55,14 @@ class ComparisonRequest(BaseModel):
 async def run_single_backtest(request: SingleBacktestRequest):
     """运行单策略回测"""
     try:
+        from backend.services.vectorbt_backtest_service import VectorBTBacktestService, check_vectorbt_available
         if not check_vectorbt_available():
             raise HTTPException(
                 status_code=503,
                 detail="VectorBT未安装，请先安装: pip install vectorbt"
             )
 
-        from backend.services.data_service import data_service
+        from backend.data.service import data_service
         from backend.services.factor_service import factor_service
         from backend.repositories.factor_repository import FactorRepository
         from backend.core.database import get_db_session
@@ -389,7 +388,7 @@ async def run_single_backtest(request: SingleBacktestRequest):
 async def run_strategy_comparison(request: ComparisonRequest):
     """运行策略对比"""
     try:
-        from backend.services.data_service import data_service
+        from backend.data.service import data_service
         from backend.services.factor_service import factor_service
         import pandas as pd
         import numpy as np

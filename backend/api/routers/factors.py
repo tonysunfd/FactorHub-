@@ -8,9 +8,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
-
-from backend.services.factor_service import factor_service
-from backend.services.factor_generator_service import factor_generator_service
+from backend.api.dependencies import service_attr
 
 router = APIRouter()
 
@@ -66,6 +64,7 @@ async def get_factors(
     - source: 来源筛选 preset/user（可选）
     """
     try:
+        factor_service = service_attr("backend.services.factor_service", "factor_service")
         factors = factor_service.get_all_factors()
 
         # 筛选
@@ -87,6 +86,7 @@ async def get_factors(
 async def get_factor_stats():
     """获取因子统计信息"""
     try:
+        factor_service = service_attr("backend.services.factor_service", "factor_service")
         stats = factor_service.get_factor_stats()
         return {
             "success": True,
@@ -100,6 +100,7 @@ async def get_factor_stats():
 async def get_factor(factor_id: int):
     """获取因子详情"""
     try:
+        factor_service = service_attr("backend.services.factor_service", "factor_service")
         # 这里需要实现获取单个因子的逻辑
         factors = factor_service.get_all_factors()
         factor = next((f for f in factors if f.get("id") == factor_id), None)
@@ -121,6 +122,7 @@ async def get_factor(factor_id: int):
 async def create_factor(request: FactorCreate):
     """创建新因子"""
     try:
+        factor_service = service_attr("backend.services.factor_service", "factor_service")
         # 创建因子
         factor = factor_service.create_factor(
             name=request.name,
@@ -143,6 +145,7 @@ async def create_factor(request: FactorCreate):
 async def update_factor(factor_id: int, request: FactorUpdate):
     """更新因子"""
     try:
+        factor_service = service_attr("backend.services.factor_service", "factor_service")
         # 更新因子
         factor_service.update_factor(
             factor_id=factor_id,
@@ -164,6 +167,7 @@ async def update_factor(factor_id: int, request: FactorUpdate):
 async def delete_factor(factor_id: int):
     """删除因子"""
     try:
+        factor_service = service_attr("backend.services.factor_service", "factor_service")
         success = factor_service.delete_factor(factor_id)
 
         if not success:
@@ -183,6 +187,7 @@ async def delete_factor(factor_id: int):
 async def batch_generate_factors(request: BatchGenerateRequest):
     """批量生成因子"""
     try:
+        factor_generator_service = service_attr("backend.services.factor_generator_service", "factor_generator_service")
         all_generated_factors = []
 
         # 根据选择的生成方法调用相应的函数
