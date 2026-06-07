@@ -34,6 +34,7 @@ import {
 import * as echarts from "echarts";
 import dayjs from "dayjs";
 import { api } from "@/services/api";
+import { autoMiningApi } from "@/services/autoMining";
 import { resolveApiUrl } from "@/services/url";
 import QuantTaskDetailsPanel from "./FactorTaskDetailsPanel";
 import "./FactorMining.css";
@@ -1136,7 +1137,7 @@ const FactorMining: React.FC = () => {
       const [startDate, endDate] = values.dateRange;
       setLlmSelectingFactors(true);
       setLlmSelectionSummary("");
-      const response = (await api.selectAutoMiningFactors({
+      const response = (await autoMiningApi.selectFactors({
         prompt: values.prompt,
         direction: values.direction,
         start_date: startDate.format("YYYY-MM-DD"),
@@ -1169,7 +1170,7 @@ const FactorMining: React.FC = () => {
       const manualPrompt = String(values.manual_prompt || "").trim() || "为当前股票挑选一组更适合手动遗传挖掘的基础因子，优先保证稳定性和可解释性。";
       setLlmSelectingFactors(true);
       setLlmSelectionSummary("");
-      const response = (await api.selectAutoMiningFactors({
+      const response = (await autoMiningApi.selectFactors({
         prompt: manualPrompt,
         direction: values.manual_direction,
         start_date: startDate.format("YYYY-MM-DD"),
@@ -1294,7 +1295,7 @@ const FactorMining: React.FC = () => {
       setCurrentStockCode(values.universe || "AUTO");
       clearTimers();
       startClock();
-      const response = (await api.startAutoMining(requestData)) as any;
+      const response = (await autoMiningApi.startTask(requestData)) as any;
       const taskId = response?.data?.task_id;
       if (!taskId) throw new Error("未返回任务ID");
       await checkAutoProgress(taskId);
@@ -1362,7 +1363,7 @@ const FactorMining: React.FC = () => {
       clearTimers();
       startClock();
 
-      const response = (await api.startAutoMiningCampaign({
+      const response = (await autoMiningApi.startCampaign({
         prompt: autoValues.prompt,
         base_factors: autoValues.base_factors || [],
         start_date: startDate.format("YYYY-MM-DD"),
@@ -1406,7 +1407,7 @@ const FactorMining: React.FC = () => {
 
   const checkAutoCampaignProgress = async (taskId: string) => {
     try {
-      const response = (await api.getAutoMiningCampaignStatus(taskId)) as any;
+      const response = (await autoMiningApi.getCampaignStatus(taskId)) as any;
       if (!response.success) return;
       const status = response.data as AutoCampaignStatus;
       setAutoCampaignStatus(status);
@@ -1414,7 +1415,7 @@ const FactorMining: React.FC = () => {
       if (status.status === "completed") {
         clearTimers();
         setMining(false);
-        const result = (await api.getAutoMiningCampaignResults(taskId)) as any;
+        const result = (await autoMiningApi.getCampaignResult(taskId)) as any;
         if (result.success) {
           setAutoCampaignResult({
             ...result.data,
@@ -1699,7 +1700,7 @@ const FactorMining: React.FC = () => {
       });
       clearTimers();
       startClock();
-      const response = (await api.continueAutoMining({
+      const response = (await autoMiningApi.continueTask({
         parent_task_id: autoStatus.task_id,
         prompt: values.prompt,
         direction: values.direction,
@@ -1738,7 +1739,7 @@ const FactorMining: React.FC = () => {
       const values = await continueForm.validateFields(["prompt", "direction", "auto_additional_factor_count"]);
       setContinueSelectingFactors(true);
       setContinueSelectionSummary("");
-      const response = (await api.selectContinueAutoMiningFactors({
+      const response = (await autoMiningApi.selectContinueFactors({
         parent_task_id: autoStatus.task_id,
         prompt: values.prompt,
         direction: values.direction,
@@ -1767,7 +1768,7 @@ const FactorMining: React.FC = () => {
 
   const checkAutoProgress = async (taskId: string) => {
     try {
-      const response = (await api.getAutoMiningStatus(taskId)) as any;
+      const response = (await autoMiningApi.getTaskStatus(taskId)) as any;
       if (!response.success) return;
       const status = response.data as MiningStatus;
       setAutoStatus(status);
@@ -1775,7 +1776,7 @@ const FactorMining: React.FC = () => {
       if (status.status === "completed") {
         clearTimers();
         setMining(false);
-        const result = (await api.getAutoMiningResults(taskId)) as any;
+        const result = (await autoMiningApi.getTaskResult(taskId)) as any;
         if (result.success) {
           setAutoResult({
             ...result.data,
