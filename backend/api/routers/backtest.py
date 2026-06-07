@@ -33,6 +33,7 @@ class SingleBacktestRequest(BaseModel):
     percentile: int = 50
     direction: str = "long"
     n_quantiles: int = 5
+    holding_period: int = 5
     weight_method: str = "equal_weight"  # 多因子时的权重方法
     shares_per_trade: int = 100  # 每次交易手数，默认1手（100股）
 
@@ -175,6 +176,26 @@ async def run_single_backtest(request: SingleBacktestRequest):
             "max_drawdown", "calmar_ratio", "win_rate", "sortino_ratio",
             "var_95", "cvar_95"
         ]}
+
+        strategy_config = {
+            "strategy_class": "factor_rotation",
+            "data_mode": request.data_mode,
+            "stock_codes": request.stock_codes,
+            "factor_name": primary_factor_name,
+            "factor_names": factor_names_to_use,
+            "strategy_type": request.strategy_type,
+            "start_date": request.start_date,
+            "end_date": request.end_date,
+            "initial_capital": request.initial_capital,
+            "commission_rate": request.commission_rate,
+            "slippage": request.slippage,
+            "percentile": request.percentile,
+            "direction": request.direction,
+            "n_quantiles": request.n_quantiles,
+            "holding_period": request.holding_period,
+            "weight_method": request.weight_method,
+            "shares_per_trade": request.shares_per_trade,
+        }
 
         # 转换 pandas Series 为列表，以便 JSON 序列化
         result_serializable = {}
@@ -370,9 +391,37 @@ async def run_single_backtest(request: SingleBacktestRequest):
         cleaned_result = clean_dict(result_serializable)
         cleaned_chart_data = clean_dict(chart_data)
 
+        repo = BacktestRepository()
+        try:
+            saved = repo.save_result({
+                "strategy_name": primary_factor_name if request.strategy_type == "single_factor" else "+".join(factor_names_to_use),
+                "factor_combination": str(factor_names_to_use),
+                "start_date": request.start_date,
+                "end_date": request.end_date,
+                "initial_capital": request.initial_capital,
+                "final_capital": request.initial_capital * (1 + (cleaned_metrics.get("total_return") or 0)),
+                "total_return": cleaned_metrics.get("total_return"),
+                "annual_return": cleaned_metrics.get("annual_return"),
+                "volatility": cleaned_metrics.get("volatility"),
+                "sharpe_ratio": cleaned_metrics.get("sharpe_ratio"),
+                "max_drawdown": cleaned_metrics.get("max_drawdown"),
+                "calmar_ratio": cleaned_metrics.get("calmar_ratio"),
+                "win_rate": cleaned_metrics.get("win_rate"),
+                "sortino_ratio": cleaned_metrics.get("sortino_ratio"),
+                "equity_curve": cleaned_result.get("equity_curve"),
+                "quantile_returns": {},
+                "trades_count": len(cleaned_result.get("trades") or []),
+                "strategy_config": strategy_config,
+            })
+            backtest_id = saved.id
+        finally:
+            repo.close()
+
         return {
             "success": True,
             "data": {
+                "backtest_id": backtest_id,
+                "strategy_config": strategy_config,
                 "metrics": cleaned_metrics,
                 "result": cleaned_result,
                 "chart_data": cleaned_chart_data

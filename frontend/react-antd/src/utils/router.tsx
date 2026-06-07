@@ -7,6 +7,7 @@ const FactorDetail = lazy(() => import('@/pages/FactorDetail'))
 const FactorMining = lazy(() => import('@/pages/FactorMining'))
 const PortfolioAnalysis = lazy(() => import('@/pages/PortfolioAnalysis'))
 const Backtesting = lazy(() => import('@/pages/Backtesting'))
+const PaperTrading = lazy(() => import('@/pages/PaperTrading'))
 const WQBrain = lazy(() => import('@/pages/WQBrain'))
 
 // 路由配置
@@ -52,6 +53,13 @@ export const routes = [
     label: '策略回测',
     icon: 'SyncOutlined',
     component: Backtesting
+  },
+  {
+    path: '/paper-trading',
+    key: 'paper-trading',
+    label: '模拟盘',
+    icon: 'LineChartOutlined',
+    component: PaperTrading
   },
   {
     path: '/wq-brain',

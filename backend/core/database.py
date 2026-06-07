@@ -1,6 +1,7 @@
 """
 数据库连接管理模块
 """
+from sqlalchemy import inspect, text
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker, Session
 from sqlalchemy.pool import StaticPool
@@ -30,10 +31,26 @@ def init_db() -> None:
     """初始化数据库，创建所有表"""
     from backend.models.factor import FactorModel, AnalysisCacheModel
     from backend.models.backtest import BacktestResultModel, TradeRecordModel
+    from backend.models.paper import PaperStrategyModel, PaperSnapshotModel, PaperOrderModel
     from backend.models.cache_metadata import CacheMetadataModel
     from backend.models.factor_version import FactorVersionModel
 
     Base.metadata.create_all(bind=engine)
+    _ensure_schema_compatibility()
+
+
+def _ensure_schema_compatibility() -> None:
+    """对已有 SQLite 库做最小兼容升级，避免开发期因缺字段直接失败。"""
+    inspector = inspect(engine)
+
+    try:
+        columns = {column["name"] for column in inspector.get_columns("backtest_results")}
+    except Exception:
+        columns = set()
+
+    if "backtest_results" in inspector.get_table_names() and "strategy_config" not in columns:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE backtest_results ADD COLUMN strategy_config JSON"))
 
 
 @contextmanager

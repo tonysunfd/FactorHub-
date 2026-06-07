@@ -34,6 +34,7 @@ import {
 import dayjs from 'dayjs'
 import * as echarts from 'echarts'
 import axios from 'axios'
+import { paperApi } from '../services/paper-api'
 import './Backtesting.css'
 
 const { RangePicker } = DatePicker
@@ -56,6 +57,7 @@ interface BacktestConfig {
   percentile: number
   direction: 'long' | 'short'
   n_quantiles: number
+  holding_period?: number
   weight_method?: string
   shares_per_trade: number
 }
@@ -72,9 +74,12 @@ interface StrategyTemplate {
   description: string
   config: BacktestConfig
   created_at: string
+  backtest_id?: number
 }
 
 interface BacktestResult {
+  backtest_id?: number
+  strategy_config?: Record<string, any>
   metrics: {
     total_return: number
     annual_return: number
@@ -194,6 +199,7 @@ const Backtesting: React.FC = () => {
       percentile: values.percentile,
       direction: values.direction,
       n_quantiles: 5,
+      holding_period: values.holding_period || 5,
       weight_method: values.weight_method || 'equal_weight',
       shares_per_trade: (values.shares_per_trade || 1) * 100  // 手数转股数（1手=100股）
     }
@@ -397,7 +403,8 @@ const Backtesting: React.FC = () => {
         name: currentStrategyName || `策略_${dayjs().format('YYYYMMDD_HHmmss')}`,
         description: `${values.strategy_type === 'single_factor' ? '单因子' : '多因子'}策略`,
         config: configToSave,
-        created_at: new Date().toISOString()
+        created_at: new Date().toISOString(),
+        backtest_id: singleBacktestResult?.backtest_id
       }
 
       const updatedStrategies = [...savedStrategies, strategy]
@@ -412,6 +419,21 @@ const Backtesting: React.FC = () => {
     } catch (error) {
       console.error('保存策略失败:', error)
       message.error('保存策略失败，请检查表单填写')
+    }
+  }
+
+  const createPaperFromStrategy = async (strategy: StrategyTemplate) => {
+    try {
+      const backtestId = strategy.backtest_id
+      if (!backtestId) {
+        message.warning('该策略尚未绑定回测记录，请先重新运行回测后再保存')
+        return
+      }
+      await paperApi.createStrategy({ backtest_id: backtestId, name: strategy.name })
+      message.success('已创建模拟盘策略')
+    } catch (error) {
+      console.error('创建模拟盘失败:', error)
+      message.error(`创建模拟盘失败: ${error instanceof Error ? error.message : '未知错误'}`)
     }
   }
 
@@ -518,13 +540,14 @@ const Backtesting: React.FC = () => {
                             data_mode: 'single',
                             stock_code: '000001',
                             strategy_type: 'single_factor',
-                            initial_capital: 1000000,
-                            commission_rate: 0.03,
-                            slippage: 0,
-                            percentile: 50,
-                            direction: 'long',
-                            shares_per_trade: 1
-                          }}
+                          initial_capital: 1000000,
+                          commission_rate: 0.03,
+                          slippage: 0,
+                          percentile: 50,
+                          direction: 'long',
+                          holding_period: 5,
+                          shares_per_trade: 1
+                        }}
                         >
                           {/* 数据配置 */}
                           <Divider style={{ fontSize: '13px', fontWeight: 600, color: '#0f172a' }}>
@@ -707,6 +730,11 @@ const Backtesting: React.FC = () => {
                             <Col span={8}>
                               <Form.Item label="滑点(%)" name="slippage">
                                 <InputNumber min={0} max={1} step={0.01} style={{ width: '100%' }} />
+                              </Form.Item>
+                            </Col>
+                            <Col span={8}>
+                              <Form.Item label="持仓周期" name="holding_period">
+                                <InputNumber min={1} max={60} step={1} style={{ width: '100%' }} addonAfter="天" />
                               </Form.Item>
                             </Col>
                             <Col span={8}>
@@ -929,6 +957,14 @@ const Backtesting: React.FC = () => {
                                     onClick={() => loadStrategy(strategy)}
                                   >
                                     加载
+                                  </Button>,
+                                  <Button
+                                    size="small"
+                                    icon={<LineChartOutlined />}
+                                    onClick={() => createPaperFromStrategy(strategy)}
+                                    disabled={!strategy.backtest_id}
+                                  >
+                                    上模拟盘
                                   </Button>,
                                   <Popconfirm
                                     title="确定删除此策略？"

@@ -2,8 +2,11 @@
 回测结果数据模型
 """
 from datetime import datetime
-from sqlalchemy import String, DateTime, Text, Integer, Float, JSON, ForeignKey
+from typing import Optional
+
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
+
 from backend.core.database import Base
 
 
@@ -31,6 +34,7 @@ class BacktestResultModel(Base):
     trades_count: Mapped[int] = mapped_column(Integer, default=0, comment="交易次数")
     benchmark_return: Mapped[float] = mapped_column(Float, nullable=True, comment="基准收益率")
     excess_return: Mapped[float] = mapped_column(Float, nullable=True, comment="超额收益率")
+    strategy_config: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="结构化策略定义")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, comment="创建时间")
 
     def __repr__(self):

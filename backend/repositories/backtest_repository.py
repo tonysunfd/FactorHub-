@@ -65,6 +65,7 @@ class BacktestRepository:
             trades_count=result_data.get("trades_count", 0),
             benchmark_return=result_data.get("benchmark_return"),
             excess_return=result_data.get("excess_return"),
+            strategy_config=result_data.get("strategy_config"),
         )
 
         self.db.add(backtest_result)
