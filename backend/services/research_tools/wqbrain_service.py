@@ -214,20 +214,7 @@ class WQBrainService:
         }
         factor.task_metadata = task_metadata
 
-        latest_snapshot = repo.get_latest_task_snapshot(factor_id)
-        if latest_snapshot:
-            payload = dict(latest_snapshot.payload or {})
-            payload["wq_brain"] = {
-                **(payload.get("wq_brain") or {}),
-                **updates,
-            }
-            latest_snapshot.payload = payload
-            repo.update_task_snapshot(latest_snapshot)
-        else:
-            repo.update(factor)
-
-        if latest_snapshot:
-            repo.update(factor)
+        repo.update(factor)
         db.close()
 
     def _load_factor_submission_context(self, factor_id: int) -> dict[str, Any] | None:

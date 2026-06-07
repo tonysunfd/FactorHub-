@@ -947,7 +947,10 @@ class FactorService:
 
     def create_factor(
         self, name: str, code: str, description: str = "",
-        category: str = "自定义", formula_type: str = "expression"
+        category: str = "自定义", formula_type: str = "expression",
+        scope_type: str = "stock", target_stock_code: str = "",
+        target_universe: str = "", origin_type: str = "manual",
+        task_metadata: dict | None = None,
     ) -> Dict:
         """创建用户自定义因子"""
         db = get_db_session()
@@ -976,6 +979,12 @@ class FactorService:
             description=description,
             source="user",
             category=category,
+            formula_type=formula_type,
+            scope_type=scope_type,
+            target_stock_code=target_stock_code,
+            target_universe=target_universe,
+            origin_type=origin_type,
+            task_metadata=task_metadata or {},
             is_active=1,
         )
         result = repo.create(factor)

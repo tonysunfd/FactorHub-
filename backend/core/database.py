@@ -52,6 +52,25 @@ def _ensure_schema_compatibility() -> None:
         with engine.begin() as connection:
             connection.execute(text("ALTER TABLE backtest_results ADD COLUMN strategy_config JSON"))
 
+    try:
+        factor_columns = {column["name"] for column in inspector.get_columns("factors")}
+    except Exception:
+        factor_columns = set()
+
+    if "factors" in inspector.get_table_names():
+        factor_alters = {
+            "formula_type": "ALTER TABLE factors ADD COLUMN formula_type VARCHAR(20) DEFAULT 'expression'",
+            "scope_type": "ALTER TABLE factors ADD COLUMN scope_type VARCHAR(20) DEFAULT 'stock'",
+            "target_stock_code": "ALTER TABLE factors ADD COLUMN target_stock_code VARCHAR(32) DEFAULT ''",
+            "target_universe": "ALTER TABLE factors ADD COLUMN target_universe VARCHAR(64) DEFAULT ''",
+            "origin_type": "ALTER TABLE factors ADD COLUMN origin_type VARCHAR(32) DEFAULT 'manual'",
+            "task_metadata": "ALTER TABLE factors ADD COLUMN task_metadata JSON DEFAULT '{}'",
+        }
+        with engine.begin() as connection:
+            for column_name, alter_sql in factor_alters.items():
+                if column_name not in factor_columns:
+                    connection.execute(text(alter_sql))
+
 
 @contextmanager
 def get_db() -> Generator[Session, None, None]:

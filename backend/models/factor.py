@@ -19,6 +19,12 @@ class FactorModel(Base):
     description: Mapped[str] = mapped_column(Text, nullable="", default="")
     source: Mapped[str] = mapped_column(String(20), nullable=False, default="user")  # preset 或 user
     category: Mapped[str] = mapped_column(String(50), nullable="", default="")  # 因子分类
+    formula_type: Mapped[str] = mapped_column(String(20), nullable=False, default="expression")
+    scope_type: Mapped[str] = mapped_column(String(20), nullable=False, default="stock")
+    target_stock_code: Mapped[str] = mapped_column(String(32), nullable="", default="")
+    target_universe: Mapped[str] = mapped_column(String(64), nullable="", default="")
+    origin_type: Mapped[str] = mapped_column(String(32), nullable=False, default="manual")
+    task_metadata: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     is_active: Mapped[int] = mapped_column(Integer, default=1)  # 0: 禁用, 1: 启用
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
@@ -32,6 +38,12 @@ class FactorModel(Base):
             "description": self.description,
             "source": self.source,
             "category": self.category,
+            "formula_type": self.formula_type,
+            "scope_type": self.scope_type,
+            "target_stock_code": self.target_stock_code,
+            "target_universe": self.target_universe,
+            "origin_type": self.origin_type,
+            "task_metadata": self.task_metadata or {},
             "is_active": bool(self.is_active),
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,

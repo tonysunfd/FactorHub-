@@ -22,6 +22,11 @@ class FactorCreate(BaseModel):
     category: str
     description: str = ""
     formula_type: str = "expression"  # expression 或 function
+    scope_type: str = "stock"
+    target_stock_code: str = ""
+    target_universe: str = ""
+    origin_type: str = "manual"
+    task_metadata: dict = {}
 
 
 class FactorUpdate(BaseModel):
@@ -129,7 +134,12 @@ async def create_factor(request: FactorCreate):
             code=request.code,
             category=request.category,
             description=request.description,
-            formula_type=request.formula_type
+            formula_type=request.formula_type,
+            scope_type=request.scope_type,
+            target_stock_code=request.target_stock_code,
+            target_universe=request.target_universe,
+            origin_type=request.origin_type,
+            task_metadata=request.task_metadata,
         )
 
         return {

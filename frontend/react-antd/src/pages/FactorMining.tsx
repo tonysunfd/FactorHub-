@@ -34,6 +34,7 @@ import * as echarts from "echarts";
 import dayjs from "dayjs";
 import { api } from "@/services/api";
 import { autoMiningApi } from "@/services/autoMining";
+import wqbrainApi from "@/services/wqbrain-api";
 import { resolveApiUrl } from "@/services/url";
 import {
   buildProgressHistory,
@@ -88,6 +89,7 @@ interface AutoFactor {
   name: string;
   expression: string;
   score: number;
+  factor_id?: number;
   grade?: string;
   report_url?: string;
   report_metrics?: Record<string, any>;
@@ -105,6 +107,9 @@ interface AutoFactor {
 
 const getFactorDetailKey = (factor: AutoFactor, index: number) =>
   `${factor.task_id || factor.name || "factor"}-${index}`;
+
+const getFactorClientKey = (factor: Partial<AutoFactor> | null | undefined, index: number) =>
+  `${factor?.task_id || factor?.name || "factor"}::${factor?.expression || "expr"}::${index}`;
 
 interface MiningStatus {
   task_id: string;
@@ -252,6 +257,32 @@ interface PersistedRDAgentTaskState {
   updatedAt?: string;
 }
 
+interface LocalWQBrainState {
+  factor_id?: number;
+  alpha_id?: string | null;
+  submission_status?: string | null;
+  platform_status?: string | null;
+  sc_result?: string | null;
+  sc_value?: number | null;
+  sc_limit?: number | null;
+  wq_fitness?: number | null;
+  wq_sharpe?: number | null;
+  wq_returns?: number | null;
+}
+
+interface SyncedWQBrainFactorState {
+  factor_id: number;
+  alpha_id?: string | null;
+  final_status?: string | null;
+  status?: string | null;
+  sc_result?: string | null;
+  sc_value?: number | null;
+  sc_limit?: number | null;
+  fitness?: number | null;
+  sharpe?: number | null;
+  returns?: number | null;
+}
+
 const normalizeTaskDetailsForDashboard = (raw?: Record<string, any> | null) => {
   if (!raw || typeof raw !== 'object') return null;
   const reportMetrics = raw.report_metrics || raw.metrics || {};
@@ -378,6 +409,50 @@ const normalizeRDAgentResultForDashboard = (result: AutoCampaignResult | null | 
       : result.final_round_result,
     manual_report: finalRound?.manual_report || result.manual_report,
     continue_mining_request: finalRound?.continue_mining_request || result.continue_mining_request,
+  };
+};
+
+const mergeWQStateIntoFactor = (factor: AutoFactor, updates: LocalWQBrainState): AutoFactor => {
+  const nextWQBrain = {
+    ...(factor.wq_brain || {}),
+    ...updates,
+    alpha_id: updates.alpha_id ?? factor.wq_brain?.alpha_id,
+    submission_status: updates.submission_status ?? factor.wq_brain?.submission_status,
+    platform_status: updates.platform_status ?? factor.wq_brain?.platform_status,
+    sc_result: updates.sc_result ?? factor.wq_brain?.sc_result,
+    sc_value: updates.sc_value ?? factor.wq_brain?.sc_value,
+    sc_limit: updates.sc_limit ?? factor.wq_brain?.sc_limit,
+    wq_fitness: updates.wq_fitness ?? factor.wq_brain?.wq_fitness,
+    wq_sharpe: updates.wq_sharpe ?? factor.wq_brain?.wq_sharpe,
+    wq_returns: updates.wq_returns ?? factor.wq_brain?.wq_returns,
+  };
+
+  const nextTaskDetails = factor.task_details
+    ? {
+        ...factor.task_details,
+        wq_brain: {
+          ...(factor.task_details.wq_brain || {}),
+          ...nextWQBrain,
+        },
+      }
+    : factor.task_details;
+
+  const nextQuantTaskDetails = factor.quantgpt_task_details
+    ? {
+        ...factor.quantgpt_task_details,
+        wq_brain: {
+          ...(factor.quantgpt_task_details.wq_brain || {}),
+          ...nextWQBrain,
+        },
+      }
+    : factor.quantgpt_task_details;
+
+  return {
+    ...factor,
+    factor_id: updates.factor_id ?? factor.factor_id,
+    wq_brain: nextWQBrain,
+    task_details: nextTaskDetails,
+    quantgpt_task_details: nextQuantTaskDetails,
   };
 };
 
@@ -604,6 +679,9 @@ const FactorMining: React.FC = () => {
   const [persistedRDAgentTaskState, setPersistedRDAgentTaskState] = useState<PersistedRDAgentTaskState | null>(() =>
     loadPersistedRDAgentTaskState()
   );
+  const [wqSubmittingKeys, setWqSubmittingKeys] = useState<Record<string, boolean>>({});
+  const [wqSyncingKeys, setWqSyncingKeys] = useState<Record<string, boolean>>({});
+  const [wqBulkSyncing, setWqBulkSyncing] = useState(false);
 
   const currentStatus = activeTab === "manual" ? manualStatus : autoStatus;
   const continuationInsightSummary = useMemo(
@@ -612,6 +690,45 @@ const FactorMining: React.FC = () => {
   );
   const currentResult = activeTab === "manual" ? manualResult : autoResult;
   const isAutoLikeTab = activeTab !== "manual";
+
+  const patchAutoResultFactor = (targetIndex: number, updater: (factor: AutoFactor) => AutoFactor) => {
+    setAutoResult((prev) => {
+      if (!prev?.factors?.[targetIndex]) return prev;
+      const nextFactors = prev.factors.map((factor, index) =>
+        index === targetIndex ? updater(factor) : factor
+      );
+      return {
+        ...prev,
+        factors: nextFactors,
+        candidates: prev.candidates?.map((factor, index) =>
+          index === targetIndex ? updater(factor) : factor
+        ) || prev.candidates,
+      };
+    });
+  };
+
+  const patchAutoCampaignRetainedFactor = (targetIndex: number, updater: (factor: AutoFactor) => AutoFactor) => {
+    setAutoCampaignResult((prev) => {
+      if (!prev?.retained_factors?.[targetIndex]) return prev;
+      const nextRetained = prev.retained_factors.map((factor, index) =>
+        index === targetIndex ? updater(factor) : factor
+      );
+      return {
+        ...prev,
+        retained_factors: nextRetained,
+      };
+    });
+  };
+
+  const patchCurrentDisplayedFactor = (targetIndex: number, updater: (factor: AutoFactor) => AutoFactor) => {
+    if (activeTab === "rdagent") {
+      patchAutoCampaignRetainedFactor(targetIndex, updater);
+      return;
+    }
+    if (activeTab === "auto") {
+      patchAutoResultFactor(targetIndex, updater);
+    }
+  };
 
   const getRDAgentTotalCandidates = (values: Record<string, any>) =>
     Number(values.max_iterations || 1) * Number(values.candidates_per_iteration || 1);
@@ -1860,7 +1977,7 @@ const FactorMining: React.FC = () => {
     }
   };
 
-  const saveFactor = async (factor: ManualFactor | AutoFactor, index: number, retryCount = 0) => {
+  const saveFactor = async (factor: ManualFactor | AutoFactor, index: number, retryCount = 0): Promise<any | null> => {
     const today = new Date();
     const dateStr = [
       today.getFullYear(),
@@ -1926,17 +2043,18 @@ const FactorMining: React.FC = () => {
         message.success(`因子 "${factorName}" 已保存到因子库`);
         setSavedFactorNames((prev) => new Set(prev).add(factorName));
         await loadFactors();
-        return;
+        return response.data || null;
       }
       throw new Error(response?.data?.detail || response?.message || "未知错误");
     } catch (error: any) {
       const errorMsg = error?.response?.data?.detail || error?.message || "未知错误";
       if (String(errorMsg).includes("已存在") && retryCount < 5) {
-        await saveFactor(factor, index, retryCount + 1);
+        return await saveFactor(factor, index, retryCount + 1);
       } else {
         message.error(`保存因子失败: ${errorMsg}`);
       }
     }
+    return null;
   };
 
   const saveAllFactors = async () => {
@@ -1954,6 +2072,161 @@ const FactorMining: React.FC = () => {
     for (let i = 0; i < factorsToSave.length; i += 1) {
       // eslint-disable-next-line no-await-in-loop
       await saveFactor(factorsToSave[i] as any, i);
+    }
+  };
+
+  const handleSubmitFactorToWQBrain = async (factor: AutoFactor, index: number) => {
+    const clientKey = getFactorClientKey(factor, index);
+    setWqSubmittingKeys((prev) => ({ ...prev, [clientKey]: true }));
+    try {
+      let factorId = factor.factor_id;
+      if (!factorId) {
+        const saved = await saveFactor(factor, index);
+        factorId = saved?.id;
+        if (!factorId) {
+          throw new Error("保存因子后未拿到 factor_id，无法提交到 WQ Brain");
+        }
+        patchCurrentDisplayedFactor(index, (current) =>
+          mergeWQStateIntoFactor(current, { factor_id: factorId })
+        );
+      }
+
+      const response = await wqbrainApi.submitAlpha({
+        factor_id: factorId,
+        account: "primary",
+        auto_submit: true,
+      }) as any;
+
+      if (!response?.success) {
+        throw new Error(response?.message || "提交到 WQ Brain 失败");
+      }
+
+      patchCurrentDisplayedFactor(index, (current) =>
+        mergeWQStateIntoFactor(current, {
+          factor_id: factorId,
+          alpha_id: response?.alpha_id || response?.summary?.alpha_id || current.wq_brain?.alpha_id || null,
+          submission_status: response?.submitted ? "SUBMITTED" : "SIMULATED",
+        })
+      );
+
+      message.success(response?.alpha_id ? `已提交到 WQ Brain：${response.alpha_id}` : "已提交到 WQ Brain");
+      await handleSyncFactorWQState(
+        mergeWQStateIntoFactor(factor, {
+          factor_id: factorId,
+          alpha_id: response?.alpha_id || response?.summary?.alpha_id || factor.wq_brain?.alpha_id || null,
+        }),
+        index,
+      );
+    } catch (error: any) {
+      message.error(error?.message || "提交到 WQ Brain 失败");
+    } finally {
+      setWqSubmittingKeys((prev) => ({ ...prev, [clientKey]: false }));
+    }
+  };
+
+  const handleSyncFactorWQState = async (factor: AutoFactor, index: number) => {
+    const clientKey = getFactorClientKey(factor, index);
+    const factorId = factor.factor_id;
+    if (!factorId) {
+      message.warning("请先保存该因子，再同步 WQ Brain 状态");
+      return;
+    }
+
+    setWqSyncingKeys((prev) => ({ ...prev, [clientKey]: true }));
+    try {
+      const response = await wqbrainApi.syncCandidates({
+        factor_ids: [factorId],
+        account: "primary",
+      }) as any;
+
+      const refreshed = response?.factors?.find((item: any) => Number(item.factor_id) === Number(factorId));
+      if (!refreshed) {
+        message.info("当前因子还没有可同步的 Alpha 状态");
+        return;
+      }
+
+      patchCurrentDisplayedFactor(index, (current) =>
+        mergeWQStateIntoFactor(current, {
+          factor_id: factorId,
+          alpha_id: refreshed.alpha_id ?? current.wq_brain?.alpha_id ?? null,
+          submission_status: refreshed.final_status ?? current.wq_brain?.submission_status ?? null,
+          platform_status: refreshed.status ?? current.wq_brain?.platform_status ?? null,
+          sc_result: refreshed.sc_result ?? current.wq_brain?.sc_result ?? null,
+          sc_value: refreshed.sc_value ?? current.wq_brain?.sc_value ?? null,
+          sc_limit: refreshed.sc_limit ?? current.wq_brain?.sc_limit ?? null,
+          wq_fitness: refreshed.fitness ?? current.wq_brain?.wq_fitness ?? null,
+          wq_sharpe: refreshed.sharpe ?? current.wq_brain?.wq_sharpe ?? null,
+          wq_returns: refreshed.returns ?? current.wq_brain?.wq_returns ?? null,
+        })
+      );
+
+      message.success(
+        response?.summary
+          ? `同步完成，ACTIVE ${response.summary.active || 0} 个`
+          : "WQ Brain 状态已同步"
+      );
+    } catch (error: any) {
+      message.error(error?.message || "同步 WQ Brain 状态失败");
+    } finally {
+      setWqSyncingKeys((prev) => ({ ...prev, [clientKey]: false }));
+    }
+  };
+
+  const handleBulkSyncCurrentFactors = async () => {
+    const currentFactors = (
+      activeTab === "rdagent"
+        ? autoCampaignResult?.retained_factors
+        : autoResult?.factors
+    ) || [];
+    const factorIds = currentFactors
+      .map((factor) => factor.factor_id)
+      .filter((factorId): factorId is number => Number.isFinite(Number(factorId)));
+
+    if (!factorIds.length) {
+      message.warning("当前页面还没有已保存并提交过的因子可同步");
+      return;
+    }
+
+    setWqBulkSyncing(true);
+    try {
+      const response = await wqbrainApi.syncCandidates({
+        factor_ids: factorIds,
+        account: "primary",
+      }) as any;
+      const refreshedById = new Map(
+        ((response?.factors || []) as SyncedWQBrainFactorState[]).map((item) => [Number(item.factor_id), item])
+      );
+
+      currentFactors.forEach((factor, index) => {
+        const factorId = factor.factor_id;
+        if (!factorId || !refreshedById.has(Number(factorId))) return;
+        const refreshed = refreshedById.get(Number(factorId));
+        if (!refreshed) return;
+        patchCurrentDisplayedFactor(index, (current) =>
+          mergeWQStateIntoFactor(current, {
+            factor_id: factorId,
+            alpha_id: refreshed.alpha_id ?? current.wq_brain?.alpha_id ?? null,
+            submission_status: refreshed.final_status ?? current.wq_brain?.submission_status ?? null,
+            platform_status: refreshed.status ?? current.wq_brain?.platform_status ?? null,
+            sc_result: refreshed.sc_result ?? current.wq_brain?.sc_result ?? null,
+            sc_value: refreshed.sc_value ?? current.wq_brain?.sc_value ?? null,
+            sc_limit: refreshed.sc_limit ?? current.wq_brain?.sc_limit ?? null,
+            wq_fitness: refreshed.fitness ?? current.wq_brain?.wq_fitness ?? null,
+            wq_sharpe: refreshed.sharpe ?? current.wq_brain?.wq_sharpe ?? null,
+            wq_returns: refreshed.returns ?? current.wq_brain?.wq_returns ?? null,
+          })
+        );
+      });
+
+      message.success(
+        response?.summary
+          ? `批量同步完成，ACTIVE ${response.summary.active || 0} 个`
+          : "已批量同步 WQ Brain 状态"
+      );
+    } catch (error: any) {
+      message.error(error?.message || "批量同步 WQ Brain 状态失败");
+    } finally {
+      setWqBulkSyncing(false);
     }
   };
 
@@ -3085,9 +3358,11 @@ const FactorMining: React.FC = () => {
                   {autoCampaignResult.retained_factors.map((factor: any, index: number) => {
                     const meta = factor.automation_meta || {};
                     const detailKey = getFactorDetailKey(factor, index);
+                    const clientKey = getFactorClientKey(factor, index);
                     const detailsExpanded = expandedDetailsKey === detailKey;
                     const factorTaskDetails = buildFactorTaskDetailsForDashboard(factor);
                     const factorReportUrl = factorTaskDetails?.report_url || factor.report_url;
+                    const factorSubmissionStatus = factor.wq_brain?.submission_status || factor.wq_brain?.platform_status || "UNSUBMITTED";
                     return (
                       <Card key={`${factor.expression || factor.name || index}-${index}`} className="factor-card" size="small">
                         <div className="factor-header">
@@ -3096,6 +3371,9 @@ const FactorMining: React.FC = () => {
                               <Tag color="blue">Top {index + 1}</Tag>
                               <Tag color="cyan">第 {meta.round_index || "-"} 轮</Tag>
                               {isRDAgentResult ? <Tag color="gold">待人工确认</Tag> : null}
+                              <Tag color={factorSubmissionStatus === "ACTIVE" ? "green" : factorSubmissionStatus === "SC_FAIL" ? "red" : factorSubmissionStatus === "SC_PENDING" ? "gold" : "default"}>
+                                {factorSubmissionStatus}
+                              </Tag>
                               <span className="factor-name">{factor.name || `Factor_${index + 1}`}</span>
                               {factor.grade ? <Tag color="purple">{factor.grade}</Tag> : null}
                             </Space>
@@ -3111,6 +3389,21 @@ const FactorMining: React.FC = () => {
                           <Space wrap>
                             <Button type="primary" size="small" icon={<SaveOutlined />} onClick={() => saveFactor(factor, index)}>
                               {isRDAgentResult ? "确认并保存" : "保存到因子库"}
+                            </Button>
+                            <Button
+                              size="small"
+                              loading={!!wqSubmittingKeys[clientKey]}
+                              onClick={() => void handleSubmitFactorToWQBrain(factor, index)}
+                            >
+                              保存并提交 WQ
+                            </Button>
+                            <Button
+                              size="small"
+                              disabled={!factor.factor_id}
+                              loading={!!wqSyncingKeys[clientKey]}
+                              onClick={() => void handleSyncFactorWQState(factor, index)}
+                            >
+                              同步 WQ 状态
                             </Button>
                             <Button size="small" icon={<SettingOutlined />} onClick={() => toggleDetailsPreview(factor, index)}>
                               {detailsExpanded ? "收起详情" : "展开详情"}
@@ -3362,9 +3655,11 @@ const FactorMining: React.FC = () => {
             <div className="factors-list">
               {factorsToRender.map((factor: any, index: number) => {
                 const detailKey = getFactorDetailKey(factor, index);
+                const clientKey = getFactorClientKey(factor, index);
                 const detailsExpanded = expandedDetailsKey === detailKey;
                 const factorTaskDetails = buildFactorTaskDetailsForDashboard(factor);
                 const factorReportUrl = factorTaskDetails?.report_url || factor.report_url;
+                const factorSubmissionStatus = factor.wq_brain?.submission_status || factor.wq_brain?.platform_status || "UNSUBMITTED";
                 return (
                 <Card key={index} className="factor-card" size="small">
                   <div className="factor-header">
@@ -3374,6 +3669,11 @@ const FactorMining: React.FC = () => {
                         <span className="factor-name">{factor.name || `Factor_${index + 1}`}</span>
                         {isAutoLikeTab && factor.grade ? <Tag color="purple">{factor.grade}</Tag> : null}
                         {isAutoLikeTab && factor.source ? <Tag color="cyan">{factor.source}</Tag> : null}
+                        {isAutoLikeTab ? (
+                          <Tag color={factorSubmissionStatus === "ACTIVE" ? "green" : factorSubmissionStatus === "SC_FAIL" ? "red" : factorSubmissionStatus === "SC_PENDING" ? "gold" : "default"}>
+                            {factorSubmissionStatus}
+                          </Tag>
+                        ) : null}
                       </Space>
                       <div className="factor-expression">{factor.expression}</div>
                     </div>
@@ -3397,6 +3697,25 @@ const FactorMining: React.FC = () => {
                       <Button type="primary" size="small" icon={<SaveOutlined />} onClick={() => saveFactor(factor, index)}>
                         保存到因子库
                       </Button>
+                      {isAutoLikeTab ? (
+                        <Button
+                          size="small"
+                          loading={!!wqSubmittingKeys[clientKey]}
+                          onClick={() => void handleSubmitFactorToWQBrain(factor, index)}
+                        >
+                          保存并提交 WQ
+                        </Button>
+                      ) : null}
+                      {isAutoLikeTab ? (
+                        <Button
+                          size="small"
+                          disabled={!factor.factor_id}
+                          loading={!!wqSyncingKeys[clientKey]}
+                          onClick={() => void handleSyncFactorWQState(factor, index)}
+                        >
+                          同步 WQ 状态
+                        </Button>
+                      ) : null}
                       {isAutoLikeTab ? (
                         <Button size="small" onClick={() => toggleDetailsPreview(factor, index)}>
                           {detailsExpanded ? "收起详情" : "展开详情"}
@@ -3441,6 +3760,11 @@ const FactorMining: React.FC = () => {
               <Button type="primary" icon={<SaveOutlined />} onClick={saveAllFactors}>
                 {activeTab === "rdagent" ? "全部确认并保存" : "全部保存到因子库"}
               </Button>
+              {isAutoLikeTab ? (
+                <Button loading={wqBulkSyncing} onClick={() => void handleBulkSyncCurrentFactors()}>
+                  批量同步 WQ Brain 状态
+                </Button>
+              ) : null}
               {activeTab === "auto" && autoStatus?.task_id ? (
                 <Button onClick={() => {
                   setShowContinuePanel((prev) => !prev);
