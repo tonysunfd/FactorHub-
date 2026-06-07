@@ -4,6 +4,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pandas as pd
+from fastapi import BackgroundTasks
 
 from backend.api.routers import mining
 
@@ -131,3 +132,57 @@ def test_run_genetic_mining_persists_running_candidates(monkeypatch) -> None:
             "fitness": 0.21,
         }
     ]
+
+
+def test_start_genetic_mining_returns_without_waiting_for_completion(monkeypatch) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_run(task_id: str, request) -> None:
+        mining.mining_tasks[task_id]["status"] = "running"
+        mining.mining_tasks[task_id]["current_generation"] = 1
+        mining.mining_tasks[task_id]["total_generations"] = 8
+        mining.mining_tasks[task_id]["best_fitness"] = 0.12
+        mining.mining_tasks[task_id]["avg_fitness"] = 0.08
+        mining.mining_tasks[task_id]["fitness_history"] = {"best": [0.12], "average": [0.08]}
+        started.set()
+        await release.wait()
+        mining.mining_tasks[task_id]["status"] = "completed"
+
+    created_tasks: list[asyncio.Task] = []
+    original_create_task = asyncio.create_task
+
+    def tracked_create_task(coro):
+        task = original_create_task(coro)
+        created_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(mining, "_run_genetic_mining", fake_run)
+    monkeypatch.setattr(mining.asyncio, "create_task", tracked_create_task)
+
+    request = mining.GeneticMiningRequest(
+        stock_code="000001.SZ",
+        base_factors=["Alpha1", "Alpha2"],
+        start_date="2024-01-01",
+        end_date="2024-01-31",
+        population_size=8,
+        n_generations=8,
+        cx_prob=0.6,
+        mut_prob=0.2,
+    )
+
+    async def scenario() -> None:
+        response = await mining.start_genetic_mining(request, BackgroundTasks())
+        task_id = response["data"]["task_id"]
+        assert response["data"]["status"] == "pending"
+
+        await asyncio.wait_for(started.wait(), timeout=1)
+        status_payload = mining._build_mining_status_payload(task_id, mining.mining_tasks[task_id])
+        assert status_payload["status"] == "running"
+        assert status_payload["current_generation"] == 1
+        assert status_payload["fitness_history"]["best"] == [0.12]
+
+        release.set()
+        await asyncio.gather(*created_tasks)
+
+    asyncio.run(scenario())

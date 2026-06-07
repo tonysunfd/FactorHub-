@@ -326,7 +326,8 @@ async def start_genetic_mining(request: GeneticMiningRequest, background_tasks: 
     """启动遗传算法挖掘"""
     try:
         task_id = _create_task("genetic")
-        background_tasks.add_task(_run_genetic_mining, task_id, request)
+        # genetic mining 计算较重，直接挂到后台 asyncio task，避免阻塞首个状态轮询
+        asyncio.create_task(_run_genetic_mining(task_id, request))
         return _build_task_response(task_id, "挖掘任务已启动")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -463,137 +464,144 @@ async def get_auto_mining_report(filename: str):
 async def _run_genetic_mining(task_id: str, request: GeneticMiningRequest):
     """后台执行遗传算法挖掘"""
     try:
-        logger.info("Starting mining task %s", task_id)
-        logger.info("Stock: %s, Base factors: %s", request.stock_code, request.base_factors)
-        logger.info(
-            "Parameters: population=%s, generations=%s",
-            request.population_size,
-            request.n_generations,
-        )
-
-        from backend.core.database import get_db_session
-        from backend.data.service import data_service
-        from backend.repositories.factor_repository import FactorRepository
-        from backend.services.factor_service import factor_service
-
-        mining_tasks[task_id]["status"] = "running"
-        mining_tasks[task_id]["request"] = request.model_dump()
-        mining_tasks[task_id]["candidates"] = []
-
-        data = data_service.get_stock_data(request.stock_code, request.start_date, request.end_date)
-        if data is None or len(data) == 0:
-            raise Exception("未获取到有效数据")
-
-        if "close" in data.columns:
-            data["return"] = data["close"].pct_change()
-
-        base_factor_codes: list[str] = []
-        if request.base_factors:
-            try:
-                db = get_db_session()
-                repo = FactorRepository(db)
-                for factor_name in request.base_factors:
-                    factor = repo.get_by_name(factor_name)
-                    if factor:
-                        base_factor_codes.append(factor.code)
-                        logger.info("Found factor: %s -> %s", factor_name, factor.code)
-                    else:
-                        logger.warning("Factor not found in database: %s", factor_name)
-                db.close()
-            except Exception as exc:
-                logger.error("Error loading factors from database: %s", exc)
-
-        if not base_factor_codes:
-            base_factor_codes = [
-                "RSI(close, 14)",
-                "SMA(close, 20)",
-                "close / open",
-                "volume / 1000000",
-                "MACD(close, 12, 26, 9)[0]",
-            ]
-
-        try:
-            from backend.services.genetic_factor_mining_service import create_genetic_mining_service
-
-            mining_service = create_genetic_mining_service(
-                base_factors=base_factor_codes,
-                data=data,
-                return_column="return",
-                population_size=request.population_size,
-                n_generations=request.n_generations,
-                cx_prob=request.cx_prob,
-                mut_prob=request.mut_prob,
-                factor_calculator=factor_service.calculator,
-            )
-
-            def progress_callback(gen, total_gen, best_fitness, avg_fitness, candidates=None):
-                _store_manual_task_progress(
-                    task_id=task_id,
-                    generation=gen,
-                    total_generations=total_gen,
-                    best_fitness=best_fitness,
-                    avg_fitness=avg_fitness,
-                    candidates=candidates,
-                )
-
-            mining_service.set_progress_callback(progress_callback)
-            result = mining_service.mine_factors()
-            if not result.get("success"):
-                raise Exception(result.get("message", "挖掘失败"))
-
-            best_factors = result.get("best_factors", [])
-            discovered_factors = []
-            for index, factor_info in enumerate(best_factors):
-                validation = factor_info.get("validation", {})
-                ic = validation.get("ic_validation", {}).get("ic", 0.0)
-                ir = validation.get("ir_validation", {}).get("ir", 0.0)
-                fitness = factor_info.get("fitness", 0.0)
-                discovered_factors.append(
-                    {
-                        "name": f"Mined_Factor_{index + 1}",
-                        "expression": factor_info["expression"],
-                        "ic": float(ic) if ic else 0.0,
-                        "ir": float(ir) if ir else 0.0,
-                        "fitness": float(fitness),
-                    }
-                )
-
-            logbook = result.get("logbook")
-            if logbook is not None:
-                fitness_history = {
-                    "best": [float(gen["max"]) for gen in logbook],
-                    "average": [float(gen["avg"]) for gen in logbook],
-                }
-            else:
-                fitness_history = {"best": [], "average": []}
-
-            result_data = {
-                "factors": discovered_factors,
-                "best_fitness": float(discovered_factors[0]["fitness"]) if discovered_factors else 0.0,
-                "avg_fitness": sum(f["fitness"] for f in discovered_factors) / len(discovered_factors) if discovered_factors else 0.0,
-                "generations": request.n_generations,
-                "fitness_history": fitness_history,
-            }
-
-            mining_tasks[task_id]["status"] = "completed"
-            mining_tasks[task_id]["progress"] = 100
-            mining_tasks[task_id]["result"] = result_data
-            mining_tasks[task_id]["candidates"] = result_data["factors"]
-            mining_tasks[task_id]["current_generation"] = request.n_generations
-            mining_tasks[task_id]["total_generations"] = request.n_generations
-            mining_tasks[task_id]["best_fitness"] = result_data["best_fitness"]
-            mining_tasks[task_id]["avg_fitness"] = result_data["avg_fitness"]
-            mining_tasks[task_id]["fitness_history"] = fitness_history
-        except ImportError as exc:
-            logger.warning("DEAP library not available, using simulation mode: %s", exc)
-            await _run_simulated_mining(task_id, request, data, base_factor_codes, factor_service)
+        await asyncio.to_thread(_run_genetic_mining_sync, task_id, request)
     except Exception as exc:
         logger.error("Task %s failed: %s", task_id, exc, exc_info=True)
         mining_tasks[task_id]["status"] = "failed"
         mining_tasks[task_id]["error"] = str(exc)
 
 
-async def _run_simulated_mining(task_id: str, request: GeneticMiningRequest, data, base_factor_codes, factor_service):
+def _run_genetic_mining_sync(task_id: str, request: GeneticMiningRequest):
+    logger.info("Starting mining task %s", task_id)
+    logger.info("Stock: %s, Base factors: %s", request.stock_code, request.base_factors)
+    logger.info(
+        "Parameters: population=%s, generations=%s",
+        request.population_size,
+        request.n_generations,
+    )
+
+    from backend.core.database import get_db_session
+    from backend.data.service import data_service
+    from backend.repositories.factor_repository import FactorRepository
+    from backend.services.factor_service import factor_service
+
+    mining_tasks[task_id]["status"] = "running"
+    mining_tasks[task_id]["request"] = request.model_dump()
+    mining_tasks[task_id]["candidates"] = []
+
+    data = data_service.get_stock_data(request.stock_code, request.start_date, request.end_date)
+    if data is None or len(data) == 0:
+        raise Exception("未获取到有效数据")
+
+    if "close" in data.columns:
+        data["return"] = data["close"].pct_change()
+
+    base_factor_codes: list[str] = []
+    if request.base_factors:
+        try:
+            db = get_db_session()
+            repo = FactorRepository(db)
+            for factor_name in request.base_factors:
+                factor = repo.get_by_name(factor_name)
+                if factor:
+                    base_factor_codes.append(factor.code)
+                    logger.info("Found factor: %s -> %s", factor_name, factor.code)
+                else:
+                    logger.warning("Factor not found in database: %s", factor_name)
+            db.close()
+        except Exception as exc:
+            logger.error("Error loading factors from database: %s", exc)
+
+    if not base_factor_codes:
+        base_factor_codes = [
+            "RSI(close, 14)",
+            "SMA(close, 20)",
+            "close / open",
+            "volume / 1000000",
+            "MACD(close, 12, 26, 9)[0]",
+        ]
+
+    try:
+        from backend.services.genetic_factor_mining_service import create_genetic_mining_service
+
+        mining_service = create_genetic_mining_service(
+            base_factors=base_factor_codes,
+            data=data,
+            return_column="return",
+            population_size=request.population_size,
+            n_generations=request.n_generations,
+            cx_prob=request.cx_prob,
+            mut_prob=request.mut_prob,
+            factor_calculator=factor_service.calculator,
+        )
+
+        def progress_callback(gen, total_gen, best_fitness, avg_fitness, candidates=None):
+            _store_manual_task_progress(
+                task_id=task_id,
+                generation=gen,
+                total_generations=total_gen,
+                best_fitness=best_fitness,
+                avg_fitness=avg_fitness,
+                candidates=candidates,
+            )
+
+        mining_service.set_progress_callback(progress_callback)
+        result = mining_service.mine_factors()
+        if not result.get("success"):
+            raise Exception(result.get("message", "挖掘失败"))
+        _store_manual_mining_result(task_id, request.n_generations, result)
+    except ImportError as exc:
+        logger.warning("DEAP library not available, using simulation mode: %s", exc)
+        _run_simulated_mining_sync(task_id, request, data, base_factor_codes, factor_service)
+
+
+def _store_manual_mining_result(task_id: str, generations: int, result: dict[str, Any]) -> None:
+    best_factors = result.get("best_factors", [])
+    discovered_factors = []
+    for index, factor_info in enumerate(best_factors):
+        validation = factor_info.get("validation", {})
+        ic = validation.get("ic_validation", {}).get("ic", 0.0)
+        ir = validation.get("ir_validation", {}).get("ir", 0.0)
+        fitness = factor_info.get("fitness", 0.0)
+        discovered_factors.append(
+            {
+                "name": f"Mined_Factor_{index + 1}",
+                "expression": factor_info["expression"],
+                "ic": float(ic) if ic else 0.0,
+                "ir": float(ir) if ir else 0.0,
+                "fitness": float(fitness),
+            }
+        )
+
+    logbook = result.get("logbook")
+    if logbook is not None:
+        fitness_history = {
+            "best": [float(gen["max"]) for gen in logbook],
+            "average": [float(gen["avg"]) for gen in logbook],
+        }
+    else:
+        fitness_history = {"best": [], "average": []}
+
+    result_data = {
+        "factors": discovered_factors,
+        "best_fitness": float(discovered_factors[0]["fitness"]) if discovered_factors else 0.0,
+        "avg_fitness": sum(f["fitness"] for f in discovered_factors) / len(discovered_factors) if discovered_factors else 0.0,
+        "generations": generations,
+        "fitness_history": fitness_history,
+    }
+
+    mining_tasks[task_id]["status"] = "completed"
+    mining_tasks[task_id]["progress"] = 100
+    mining_tasks[task_id]["result"] = result_data
+    mining_tasks[task_id]["candidates"] = result_data["factors"]
+    mining_tasks[task_id]["current_generation"] = generations
+    mining_tasks[task_id]["total_generations"] = generations
+    mining_tasks[task_id]["best_fitness"] = result_data["best_fitness"]
+    mining_tasks[task_id]["avg_fitness"] = result_data["avg_fitness"]
+    mining_tasks[task_id]["fitness_history"] = fitness_history
+
+
+def _run_simulated_mining_sync(task_id: str, request: GeneticMiningRequest, data, base_factor_codes, factor_service):
     """模拟模式挖掘（当 DEAP 库未安装时使用）"""
     factor_values = {}
     for code in base_factor_codes:
@@ -651,26 +659,28 @@ async def _run_simulated_mining(task_id: str, request: GeneticMiningRequest, dat
             avg_fitness=current_avg_fitness,
             candidates=_build_simulated_candidates(gen + 1),
         )
-        await asyncio.sleep(0.5)
+        import time
+        time.sleep(0.5)
 
     discovered_factors = _build_simulated_candidates(5)
-
-    result = {
-        "factors": discovered_factors,
-        "best_fitness": discovered_factors[0]["ic"] if discovered_factors else 0,
-        "avg_fitness": sum(f["fitness"] for f in discovered_factors) / len(discovered_factors) if discovered_factors else 0,
-        "generations": n_generations,
-        "fitness_history": fitness_history,
+    simulated_result = {
+        "best_factors": [
+            {
+                "expression": factor["expression"],
+                "fitness": factor["fitness"],
+                "validation": {
+                    "ic_validation": {"ic": factor["ic"]},
+                    "ir_validation": {"ir": factor["ir"]},
+                },
+            }
+            for factor in discovered_factors
+        ],
+        "logbook": [
+            {"max": best, "avg": avg}
+            for best, avg in zip(fitness_history["best"], fitness_history["average"])
+        ],
     }
-    mining_tasks[task_id]["status"] = "completed"
-    mining_tasks[task_id]["progress"] = 100
-    mining_tasks[task_id]["result"] = result
-    mining_tasks[task_id]["candidates"] = discovered_factors
-    mining_tasks[task_id]["current_generation"] = n_generations
-    mining_tasks[task_id]["total_generations"] = n_generations
-    mining_tasks[task_id]["best_fitness"] = result["best_fitness"]
-    mining_tasks[task_id]["avg_fitness"] = result["avg_fitness"]
-    mining_tasks[task_id]["fitness_history"] = fitness_history
+    _store_manual_mining_result(task_id, n_generations, simulated_result)
 
 
 @router.get("/status/{task_id}")
