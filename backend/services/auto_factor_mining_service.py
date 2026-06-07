@@ -352,6 +352,98 @@ class AutoFactorMiningService:
                 break
         return deduped
 
+    def _generate_fallback_candidate_expressions(
+        self,
+        *,
+        base_factor_codes: list[str],
+        n_candidates: int,
+        previous_expressions: list[str] | None = None,
+        extra_excludes: list[str] | None = None,
+    ) -> list[str]:
+        pool = factor_generator_service.generate_hybrid_factors(
+            base_factor_codes or ["close", "volume", "amount"],
+            n_factors=max(n_candidates * 4, 24),
+        )
+        deduped: list[str] = []
+        seen = {
+            _normalize_expression(item)
+            for item in [*(previous_expressions or []), *(extra_excludes or [])]
+        }
+        for item in pool:
+            expression = str(item.get("expression") or "").strip()
+            if not expression:
+                continue
+            key = _normalize_expression(expression)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(expression)
+            if len(deduped) >= n_candidates:
+                break
+        return deduped
+
+    def _collect_sample_frames(
+        self,
+        *,
+        stock_codes: list[str],
+        start_date: str,
+        end_date: str,
+        max_samples: int = 3,
+    ) -> list[pd.DataFrame]:
+        samples: list[pd.DataFrame] = []
+        for stock_code in stock_codes:
+            try:
+                stock_df = self.data_service.get_stock_data(stock_code, start_date, end_date)
+            except Exception as exc:
+                logger.warning("加载样本股票 %s 失败，跳过表达式预检：%s", stock_code, exc)
+                continue
+            if stock_df is None or stock_df.empty:
+                continue
+            samples.append(stock_df.copy())
+            if len(samples) >= max_samples:
+                break
+        return samples
+
+    def _filter_supported_expressions(
+        self,
+        expressions: list[str],
+        *,
+        sample_frames: list[pd.DataFrame],
+        limit: int,
+    ) -> list[str]:
+        if not expressions or not sample_frames:
+            return expressions[:limit]
+
+        supported: list[str] = []
+        seen: set[str] = set()
+        for expression in expressions:
+            key = _normalize_expression(expression)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+
+            executable = False
+            for sample_df in sample_frames:
+                try:
+                    values = factor_service.calculator.calculate(sample_df.copy(), expression)
+                except Exception as exc:
+                    logger.info("跳过不可执行候选表达式 %s：%s", expression, exc)
+                    executable = False
+                    break
+
+                if values is None:
+                    continue
+                series = values if isinstance(values, pd.Series) else pd.Series(values)
+                if int(series.dropna().shape[0]) > 0:
+                    executable = True
+                    break
+
+            if executable:
+                supported.append(expression)
+                if len(supported) >= limit:
+                    break
+        return supported
+
     def _generate_candidates_with_llm(
         self,
         *,
@@ -447,6 +539,10 @@ class AutoFactorMiningService:
         progress_callback: Callable[[int, int, dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         base_factor_codes = self.resolve_base_factor_codes(base_factors)
+        stock_codes = self.data_service.get_stock_universe(universe, date=start_date)[:30]
+        if not stock_codes:
+            raise ValueError(f"股票池 {universe} 未返回可用股票")
+
         expressions = self.generate_candidate_expressions(
             prompt=prompt,
             base_factor_codes=base_factor_codes,
@@ -454,12 +550,33 @@ class AutoFactorMiningService:
             previous_expressions=previous_expressions,
             continuation_context=continuation_context,
         )
-        if not expressions:
-            raise ValueError("未生成可用候选表达式")
+        sample_frames = self._collect_sample_frames(
+            stock_codes=stock_codes,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        expressions = self._filter_supported_expressions(
+            expressions,
+            sample_frames=sample_frames,
+            limit=n_candidates,
+        )
 
-        stock_codes = self.data_service.get_stock_universe(universe, date=start_date)[:30]
-        if not stock_codes:
-            raise ValueError(f"股票池 {universe} 未返回可用股票")
+        if len(expressions) < n_candidates:
+            fallback_candidates = self._generate_fallback_candidate_expressions(
+                base_factor_codes=base_factor_codes,
+                n_candidates=max(n_candidates * 2, n_candidates),
+                previous_expressions=previous_expressions,
+                extra_excludes=expressions,
+            )
+            fallback_supported = self._filter_supported_expressions(
+                fallback_candidates,
+                sample_frames=sample_frames,
+                limit=n_candidates - len(expressions),
+            )
+            expressions.extend(fallback_supported)
+
+        if not expressions:
+            raise ValueError("未生成可执行候选表达式")
 
         evaluations: list[CandidateEvaluation] = []
         seen: set[str] = set()

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import pandas as pd
+from types import SimpleNamespace
 
 from backend.services.auto_factor_mining_service import AutoFactorMiningService
+from backend.services.factor_generator_service import factor_generator_service
+from backend.services.factor_service import factor_service
 
 
 def test_build_continuation_context_uses_round_evaluation() -> None:
@@ -220,3 +223,119 @@ def test_write_candidate_report_uses_reference_generator(monkeypatch, tmp_path) 
     assert calls["periods_per_year"] == 50
     assert metrics["sharpe"] == 1.23
     assert report_url == "/api/mining/reports/backtest_report_20260607_181500.html"
+
+
+def test_run_auto_mining_falls_back_when_llm_candidates_are_not_executable(monkeypatch) -> None:
+    service = AutoFactorMiningService()
+
+    sample_df = pd.DataFrame(
+        {
+            "open": [10.0 + i for i in range(40)],
+            "high": [10.5 + i for i in range(40)],
+            "low": [9.5 + i for i in range(40)],
+            "close": [10.2 + i for i in range(40)],
+            "volume": [1000.0 + i * 10 for i in range(40)],
+            "amount": [10000.0 + i * 100 for i in range(40)],
+        }
+    )
+
+    monkeypatch.setattr(service, "resolve_base_factor_codes", lambda base_factors: ["close", "volume"])
+    monkeypatch.setattr(
+        service,
+        "generate_candidate_expressions",
+        lambda **kwargs: ["rank(ts_mean(close, 5))", "ts_rank(correlation(close, volume, 10), 20)"],
+    )
+    monkeypatch.setattr(
+        factor_generator_service,
+        "generate_hybrid_factors",
+        lambda base_factors, n_factors: [{"expression": "(close / SMA(close, timeperiod=5))"}],
+    )
+
+    service._data_service = SimpleNamespace(
+        get_stock_universe=lambda universe, date: ["000001.SZ"],
+        get_stock_data=lambda stock_code, start_date, end_date: sample_df.copy(),
+    )
+
+    def fake_evaluate_expression(**kwargs):
+        expression = kwargs["expression"]
+        if expression != "(close / SMA(close, timeperiod=5))":
+            return None
+        return SimpleNamespace(
+            expression=expression,
+            score=71.5,
+            grade="B",
+            report_metrics={"sharpe": 0.9, "max_drawdown": 0.12},
+            backtest_summary={
+                "long_short_sharpe": 0.9,
+                "long_short_annual": 0.16,
+                "top_group_sharpe": 0.9,
+                "monotonicity_score": 0.7,
+                "spread": 0.02,
+                "group_returns": {"top_minus_bottom_mean": 0.02},
+                "rank_ic_mean": 0.03,
+                "ic_mean": 0.03,
+                "ic_ir": 0.8,
+                "ic_win_rate": 0.6,
+                "turnover": 0.25,
+                "wq_fitness": 0.88,
+            },
+            wq_brain={
+                "wq_rating": "B",
+                "wq_fitness": 0.88,
+                "wq_sharpe": 0.9,
+                "wq_returns": 0.16,
+                "wq_turnover": 0.25,
+                "submittable": True,
+            },
+            component_scores={"total_score": 71.5},
+            anti_overfit={"score": 75.0, "recommendation": "推荐", "tests": []},
+            interpretation={
+                "summary": "fallback ok",
+                "weaknesses": ["仍可优化"],
+                "next_steps": ["继续迭代"],
+                "rating": "B",
+                "rating_reason": "推荐",
+                "improvement_ideas": ["继续迭代"],
+            },
+            diagnostics=[],
+            report_url="/api/mining/reports/fallback.html",
+        )
+
+    monkeypatch.setattr(service, "evaluate_expression", fake_evaluate_expression)
+
+    result = service.run_auto_mining(
+        prompt="提升量价复合因子的稳定性",
+        base_factors=["close", "volume"],
+        start_date="2024-01-01",
+        end_date="2024-12-31",
+        universe="hs300",
+        benchmark="hs300",
+        n_groups=5,
+        holding_period=5,
+        n_candidates=1,
+    )
+
+    assert result["best_score"] == 71.5
+    assert result["factors"][0]["expression"] == "(close / SMA(close, timeperiod=5))"
+
+
+def test_factor_calculator_supports_integer_volume_sma() -> None:
+    df = pd.DataFrame(
+        {
+            "open": [10.0 + i for i in range(40)],
+            "high": [10.5 + i for i in range(40)],
+            "low": [9.5 + i for i in range(40)],
+            "close": [10.2 + i for i in range(40)],
+            "volume": [1000 + i * 10 for i in range(40)],
+            "amount": [10000 + i * 100 for i in range(40)],
+        }
+    )
+
+    volume_sma = factor_service.calculator.calculate(df.copy(), "SMA(volume, timeperiod=5)")
+    composite = factor_service.calculator.calculate(
+        df.copy(),
+        "((SMA(close, timeperiod=5) - SMA(close, timeperiod=20)) / SMA(close, timeperiod=20)) * (volume / SMA(volume, timeperiod=20))",
+    )
+
+    assert int(volume_sma.dropna().shape[0]) > 0
+    assert int(composite.dropna().shape[0]) > 0

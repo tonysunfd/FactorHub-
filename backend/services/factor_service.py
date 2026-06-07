@@ -60,9 +60,12 @@ class FactorCalculator:
             """简单移动平均"""
             import talib
             if isinstance(series, pd.Series):
-                result = talib.SMA(series.values, timeperiod=timeperiod, **kwargs)
+                # TA-Lib 需要 double 输入，volume/amount 等整型列要先提升 dtype。
+                values = pd.to_numeric(series, errors="coerce").astype(float).values
+                result = talib.SMA(values, timeperiod=timeperiod, **kwargs)
                 return pd.Series(result, index=series.index)
-            return talib.SMA(series, timeperiod=timeperiod, **kwargs)
+            values = pd.Series(series).astype(float).values
+            return talib.SMA(values, timeperiod=timeperiod, **kwargs)
 
         # MA 作为 SMA 的别名
         def MA(series, timeperiod=30, **kwargs):
