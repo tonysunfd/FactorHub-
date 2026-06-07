@@ -33,6 +33,7 @@ def _include_routers(app: FastAPI) -> None:
     portfolio = importlib.import_module("backend.api.routers.portfolio")
     backtest = importlib.import_module("backend.api.routers.backtest")
     data = importlib.import_module("backend.api.routers.data")
+    wqbrain = importlib.import_module("backend.api.routers.wqbrain")
 
     app.include_router(factors.router, prefix="/api/factors", tags=["因子管理"])
     app.include_router(analysis.router, prefix="/api/analysis", tags=["因子分析"])
@@ -41,6 +42,7 @@ def _include_routers(app: FastAPI) -> None:
     app.include_router(portfolio.router, prefix="/api/portfolio", tags=["组合分析"])
     app.include_router(backtest.router, prefix="/api/backtest", tags=["策略回测"])
     app.include_router(data.router, prefix="/api/data", tags=["数据管理"])
+    app.include_router(wqbrain.router, prefix="/api/wqbrain", tags=["WQ BRAIN"])
 
 
 def _load_preset_factors_sync() -> None:

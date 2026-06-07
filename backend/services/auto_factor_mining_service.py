@@ -20,8 +20,8 @@ from backend.repositories.factor_repository import FactorRepository
 from backend.services.expression_schema import FactorEvaluationResult
 from backend.services.factor_evaluation_service import FactorEvaluationService
 from backend.services.factor_generator_service import factor_generator_service
+from backend.services.quantgpt_expression_engine import QuantGPTExpressionEngine
 from backend.services.report_service import generate_report
-from backend.services.factor_service import factor_service
 from backend.services.llm_config_service import llm_config_service
 
 logger = logging.getLogger(__name__)
@@ -86,6 +86,7 @@ class AutoFactorMiningService:
     def __init__(self) -> None:
         self._data_service = None
         self._factor_evaluation_service = FactorEvaluationService()
+        self._quantgpt_engine = QuantGPTExpressionEngine()
 
     @property
     def data_service(self):
@@ -410,20 +411,10 @@ class AutoFactorMiningService:
             seen.add(key)
 
             executable = False
-            for sample_df in sample_frames:
-                try:
-                    values = factor_service.calculator.calculate(sample_df.copy(), expression)
-                except Exception as exc:
-                    logger.info("跳过不可执行候选表达式 %s：%s", expression, exc)
-                    executable = False
-                    break
-
-                if values is None:
-                    continue
-                series = values if isinstance(values, pd.Series) else pd.Series(values)
-                if int(series.dropna().shape[0]) > 0:
-                    executable = True
-                    break
+            try:
+                executable = self._quantgpt_engine.can_execute_on_frames(expression, sample_frames)
+            except Exception as exc:
+                logger.info("QuantGPT 预检失败，跳过候选表达式 %s：%s", expression, exc)
 
             if executable:
                 supported.append(expression)
@@ -530,49 +521,83 @@ class AutoFactorMiningService:
         if not stock_codes:
             raise ValueError(f"股票池 {universe} 未返回可用股票")
 
-        expressions = self.generate_candidate_expressions(
-            prompt=prompt,
-            base_factor_codes=base_factor_codes,
-            n_candidates=n_candidates,
-            previous_expressions=previous_expressions,
-            continuation_context=continuation_context,
-        )
         sample_frames = self._collect_sample_frames(
             stock_codes=stock_codes,
             start_date=start_date,
             end_date=end_date,
         )
-        expressions = self._filter_supported_expressions(
-            expressions,
-            sample_frames=sample_frames,
-            limit=n_candidates,
-        )
+        requested_candidates = max(n_candidates, 1)
+        attempted_expressions: set[str] = {
+            _normalize_expression(item)
+            for item in (previous_expressions or [])
+            if _normalize_expression(item)
+        }
+        pending_expressions: list[str] = []
 
-        if len(expressions) < n_candidates:
-            fallback_candidates = self._generate_fallback_candidate_expressions(
+        def _extend_candidate_pool(target_count: int) -> None:
+            if target_count <= 0:
+                return
+
+            seed_expressions = [
+                expression
+                for expression in [
+                    *(previous_expressions or []),
+                    *pending_expressions,
+                    *list(attempted_expressions),
+                ]
+                if expression
+            ]
+            generated = self.generate_candidate_expressions(
+                prompt=prompt,
                 base_factor_codes=base_factor_codes,
-                n_candidates=max(n_candidates * 2, n_candidates),
-                previous_expressions=previous_expressions,
-                extra_excludes=expressions,
+                n_candidates=target_count,
+                previous_expressions=seed_expressions,
+                continuation_context=continuation_context,
             )
-            fallback_supported = self._filter_supported_expressions(
-                fallback_candidates,
+            supported = self._filter_supported_expressions(
+                generated,
                 sample_frames=sample_frames,
-                limit=n_candidates - len(expressions),
+                limit=target_count,
             )
-            expressions.extend(fallback_supported)
 
-        if not expressions:
+            if len(supported) < target_count:
+                fallback_candidates = self._generate_fallback_candidate_expressions(
+                    base_factor_codes=base_factor_codes,
+                    n_candidates=max(target_count * 2, target_count),
+                    previous_expressions=seed_expressions,
+                    extra_excludes=supported,
+                )
+                supported.extend(
+                    self._filter_supported_expressions(
+                        fallback_candidates,
+                        sample_frames=sample_frames,
+                        limit=target_count - len(supported),
+                    )
+                )
+
+            for expression in supported:
+                key = _normalize_expression(expression)
+                if not key or key in attempted_expressions:
+                    continue
+                if any(_normalize_expression(item) == key for item in pending_expressions):
+                    continue
+                pending_expressions.append(expression)
+
+        _extend_candidate_pool(requested_candidates)
+
+        if not pending_expressions:
             raise ValueError("未生成可执行候选表达式")
 
         evaluations: list[FactorEvaluationResult] = []
-        seen: set[str] = set()
-        total = len(expressions)
-        for index, expression in enumerate(expressions, start=1):
+        attempt_count = 0
+        max_attempts = max(len(pending_expressions), requested_candidates * 4)
+        while pending_expressions and len(evaluations) < requested_candidates and attempt_count < max_attempts:
+            expression = pending_expressions.pop(0)
             key = _normalize_expression(expression)
-            if key in seen:
+            if not key or key in attempted_expressions:
                 continue
-            seen.add(key)
+            attempted_expressions.add(key)
+            attempt_count += 1
             evaluation = self.evaluate_expression(
                 expression=expression,
                 prompt=prompt,
@@ -587,12 +612,15 @@ class AutoFactorMiningService:
                 neutralize_cap=neutralize_cap,
             )
             if evaluation is None:
+                remaining_needed = requested_candidates - len(evaluations)
+                if not pending_expressions and attempt_count < max_attempts:
+                    _extend_candidate_pool(min(remaining_needed, max_attempts - attempt_count))
                 continue
             evaluations.append(evaluation)
             if progress_callback is not None:
                 progress_callback(
-                    index,
-                    total,
+                    len(evaluations),
+                    requested_candidates,
                     self._format_candidate_payload(
                         evaluation=evaluation,
                         prompt=prompt,
@@ -601,6 +629,8 @@ class AutoFactorMiningService:
                         round_evaluation=None,
                     ),
                 )
+            if not pending_expressions and len(evaluations) < requested_candidates and attempt_count < max_attempts:
+                _extend_candidate_pool(min(requested_candidates - len(evaluations), max_attempts - attempt_count))
 
         if not evaluations:
             raise ValueError("候选表达式评估失败，未产出有效结果")
@@ -702,6 +732,29 @@ class AutoFactorMiningService:
 
             current_round_candidates: list[dict[str, Any]] = []
 
+            def _build_in_progress_round_snapshot() -> dict[str, Any]:
+                current_scores = [float(item.get("score", 0.0) or 0.0) for item in current_round_candidates]
+                return {
+                    "round_index": round_index,
+                    "task_id": f"campaign-round-{round_index}-in-progress",
+                    "best_score": max(current_scores) if current_scores else 0.0,
+                    "avg_score": round(float(np.mean(current_scores)), 4) if current_scores else 0.0,
+                    "input_base_factors": list(current_base_factors),
+                    "previous_base_factors": previous_round.get("input_base_factors", []) if previous_round else [],
+                    "factor_changes": self._build_factor_changes(
+                        previous_base_factors=previous_round.get("input_base_factors", []) if previous_round else [],
+                        current_base_factors=current_base_factors,
+                    ),
+                    "factor_update_mode": "initial" if round_index == 1 else factor_update_mode,
+                    "selected_factors": list(current_base_factors),
+                    "continuation_hypothesis": continuation_hypothesis,
+                    "continuation_feedback": None,
+                    "retained_count": 0,
+                    "retained_factors": [],
+                    "all_factors": list(current_round_candidates),
+                    "final_round_evaluation": continuation_context,
+                }
+
             def _round_progress(done_count: int, total_count: int, candidate: dict[str, Any]) -> None:
                 current_round_candidates.append(candidate)
                 current_scores = [float(item.get("score", 0.0) or 0.0) for item in current_round_candidates]
@@ -712,7 +765,7 @@ class AutoFactorMiningService:
                         {
                             "current_round": round_index,
                             "total_rounds": exploration_rounds,
-                            "latest_round": rounds[-1] if rounds else None,
+                            "latest_round": _build_in_progress_round_snapshot(),
                             "rounds": list(rounds),
                             "retained_count": len(retained_factors),
                             "fitness_history": {
@@ -944,25 +997,43 @@ class AutoFactorMiningService:
         neutralize_cap: bool,
     ) -> FactorEvaluationResult | None:
         del neutralize_industry, neutralize_cap
-        return self._factor_evaluation_service.evaluate_factor_expression(
-            expression=expression,
-            prompt=prompt,
-            stock_codes=stock_codes,
-            start_date=start_date,
-            end_date=end_date,
-            benchmark=benchmark,
-            n_groups=n_groups,
-            holding_period=holding_period,
-            direction=direction,
-            stock_data_loader=self.data_service.get_stock_data,
-            expression_executor=lambda df, expr: factor_service.calculator.calculate(df, expr),
-            benchmark_loader=self._load_benchmark_returns,
-            report_writer=self._write_candidate_report,
-            engine_type="factorhub",
-            dialect="factorhub_native",
-            canonical_expression=None,
-            canonical_ast=None,
-        )
+        try:
+            panel_df = self._quantgpt_engine.build_panel_data(
+                stock_codes=stock_codes,
+                start_date=start_date,
+                end_date=end_date,
+                expression=expression,
+                stock_data_loader=self.data_service.get_stock_data,
+            )
+            if panel_df.empty:
+                logger.info("QuantGPT 执行器未构建出有效 panel，跳过候选：%s", expression)
+                return None
+
+            execution = self._quantgpt_engine.execute_on_panel(panel_df, expression)
+            return self._factor_evaluation_service.evaluate_factor_panel(
+                expression=expression,
+                prompt=prompt,
+                panel_df=panel_df,
+                factor_series=execution.factor_series if execution.factor_series is not None else pd.Series(dtype=float),
+                benchmark=benchmark,
+                start_date=start_date,
+                end_date=end_date,
+                n_groups=n_groups,
+                holding_period=holding_period,
+                direction=direction,
+                benchmark_loader=self._load_benchmark_returns,
+                report_writer=self._write_candidate_report,
+                engine_type=execution.engine_type,
+                dialect=execution.dialect,
+                canonical_expression=execution.canonical_expression,
+                canonical_ast=execution.canonical_ast,
+                diagnostics=execution.diagnostics,
+                execution_meta=execution.execution_meta,
+                metrics_source=execution.metrics_source,
+            )
+        except Exception as exc:
+            logger.warning("QuantGPT 执行器评估失败，直接跳过候选 %s：%s", expression, exc)
+            return None
 
     def _build_round_evaluation(
         self,
@@ -983,8 +1054,9 @@ class AutoFactorMiningService:
             "wq_fitness": best_evaluation.backtest_summary.get("wq_fitness"),
         }
 
-        primary_problem = best_evaluation.interpretation.get("weaknesses", ["暂无"])[0]
-        suggested_actions = best_evaluation.interpretation.get("next_steps", [])
+        weaknesses = list(best_evaluation.interpretation.get("weaknesses") or [])
+        primary_problem = weaknesses[0] if weaknesses else "暂无"
+        suggested_actions = list(best_evaluation.interpretation.get("next_steps") or [])
         return {
             "prompt": prompt,
             "base_factors": list(base_factors),

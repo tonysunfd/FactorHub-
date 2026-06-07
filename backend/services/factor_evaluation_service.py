@@ -32,27 +32,17 @@ def _grade_from_score(score: float) -> str:
 class FactorEvaluationService:
     """统一的因子评价服务。"""
 
-    def evaluate_factor_expression(
+    def _build_panel_from_stock_rows(
         self,
         *,
         expression: str,
-        prompt: str,
         stock_codes: list[str],
         start_date: str,
         end_date: str,
-        benchmark: str,
-        n_groups: int,
         holding_period: int,
-        direction: str,
         stock_data_loader: Callable[[str, str, str], pd.DataFrame | None],
         expression_executor: Callable[[pd.DataFrame, str], pd.Series | Any],
-        benchmark_loader: Callable[[str, str, str], pd.Series | None],
-        report_writer: Callable[[pd.Series, pd.Series | None, int], tuple[dict[str, Any], str]],
-        engine_type: str = "factorhub",
-        dialect: str = "factorhub_native",
-        canonical_expression: str | None = None,
-        canonical_ast: dict[str, Any] | None = None,
-    ) -> FactorEvaluationResult | None:
+    ) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
         rows: list[pd.DataFrame] = []
         diagnostics: list[dict[str, Any]] = []
 
@@ -83,10 +73,45 @@ class FactorEvaluationService:
                 diagnostics.append({"type": "warning", "label": "单票评估失败", "text": f"{stock_code} 评估失败：{exc}"})
 
         if not rows:
+            return pd.DataFrame(), diagnostics
+
+        return pd.concat(rows, ignore_index=True), diagnostics
+
+    def _evaluate_panel(
+        self,
+        *,
+        panel: pd.DataFrame,
+        expression: str,
+        prompt: str,
+        benchmark: str,
+        n_groups: int,
+        holding_period: int,
+        direction: str,
+        benchmark_loader: Callable[[str, str, str], pd.Series | None],
+        report_writer: Callable[[pd.Series, pd.Series | None, int], tuple[dict[str, Any], str]],
+        engine_type: str,
+        dialect: str,
+        canonical_expression: str | None,
+        canonical_ast: dict[str, Any] | None,
+        diagnostics: list[dict[str, Any]] | None = None,
+        start_date: str = "",
+        end_date: str = "",
+        metrics_source: str = "factor_evaluation_service",
+        execution_meta: dict[str, Any] | None = None,
+    ) -> FactorEvaluationResult | None:
+        if panel.empty:
             return None
 
-        panel = pd.concat(rows, ignore_index=True)
-        grouped = panel.groupby("date")
+        diagnostics = list(diagnostics or [])
+        clean_panel = panel.copy()
+        clean_panel["date"] = pd.to_datetime(clean_panel["date"], errors="coerce")
+        clean_panel["factor"] = pd.to_numeric(clean_panel["factor"], errors="coerce")
+        clean_panel["future_return"] = pd.to_numeric(clean_panel["future_return"], errors="coerce")
+        clean_panel = clean_panel.dropna(subset=["date", "stock_code", "factor", "future_return"])
+        if clean_panel.empty:
+            return None
+
+        grouped = clean_panel.groupby("date")
         daily_rank_ic: list[float] = []
         daily_spread: list[float] = []
         daily_dates: list[pd.Timestamp] = []
@@ -211,25 +236,26 @@ class FactorEvaluationService:
             {
                 "type": "info",
                 "label": "评估完成",
-                "text": f"使用 {len(rows)} 只股票、{len(spread_series)} 个截面日期完成真实候选评估。",
+                "text": f"使用 {int(clean_panel['stock_code'].nunique())} 只股票、{len(spread_series)} 个截面日期完成真实候选评估。",
             },
         )
+
+        merged_meta = dict(execution_meta or {})
+        merged_meta.setdefault("prompt", prompt)
+        merged_meta.setdefault("direction", direction)
+        merged_meta["stock_count"] = int(clean_panel["stock_code"].nunique())
+        merged_meta["date_count"] = len(spread_series)
 
         execution_result = EngineExecutionResult(
             raw_expression=expression,
             engine_type=engine_type,
             dialect=dialect,
             factor_series=None,
-            metrics_source="factor_evaluation_service",
+            metrics_source=metrics_source,
             diagnostics=list(diagnostics),
             canonical_expression=canonical_expression,
             canonical_ast=canonical_ast,
-            execution_meta={
-                "prompt": prompt,
-                "direction": direction,
-                "stock_count": len(rows),
-                "date_count": len(spread_series),
-            },
+            execution_meta=merged_meta,
         )
         return FactorEvaluationResult(
             expression=canonical_expression or expression,
@@ -249,6 +275,116 @@ class FactorEvaluationService:
             diagnostics=execution_result.diagnostics,
             report_url=report_url,
             execution_meta=execution_result.execution_meta,
+        )
+
+    def evaluate_factor_expression(
+        self,
+        *,
+        expression: str,
+        prompt: str,
+        stock_codes: list[str],
+        start_date: str,
+        end_date: str,
+        benchmark: str,
+        n_groups: int,
+        holding_period: int,
+        direction: str,
+        stock_data_loader: Callable[[str, str, str], pd.DataFrame | None],
+        expression_executor: Callable[[pd.DataFrame, str], pd.Series | Any],
+        benchmark_loader: Callable[[str, str, str], pd.Series | None],
+        report_writer: Callable[[pd.Series, pd.Series | None, int], tuple[dict[str, Any], str]],
+        engine_type: str = "factorhub",
+        dialect: str = "factorhub_native",
+        canonical_expression: str | None = None,
+        canonical_ast: dict[str, Any] | None = None,
+    ) -> FactorEvaluationResult | None:
+        panel, diagnostics = self._build_panel_from_stock_rows(
+            expression=expression,
+            stock_codes=stock_codes,
+            start_date=start_date,
+            end_date=end_date,
+            holding_period=holding_period,
+            stock_data_loader=stock_data_loader,
+            expression_executor=expression_executor,
+        )
+        return self._evaluate_panel(
+            panel=panel,
+            expression=expression,
+            prompt=prompt,
+            benchmark=benchmark,
+            n_groups=n_groups,
+            holding_period=holding_period,
+            direction=direction,
+            benchmark_loader=benchmark_loader,
+            report_writer=report_writer,
+            engine_type=engine_type,
+            dialect=dialect,
+            canonical_expression=canonical_expression,
+            canonical_ast=canonical_ast,
+            diagnostics=diagnostics,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    def evaluate_factor_panel(
+        self,
+        *,
+        expression: str,
+        prompt: str,
+        panel_df: pd.DataFrame,
+        factor_series: pd.Series,
+        benchmark: str,
+        start_date: str,
+        end_date: str,
+        n_groups: int,
+        holding_period: int,
+        direction: str,
+        benchmark_loader: Callable[[str, str, str], pd.Series | None],
+        report_writer: Callable[[pd.Series, pd.Series | None, int], tuple[dict[str, Any], str]],
+        engine_type: str,
+        dialect: str,
+        canonical_expression: str | None,
+        canonical_ast: dict[str, Any] | None,
+        diagnostics: list[dict[str, Any]] | None = None,
+        execution_meta: dict[str, Any] | None = None,
+        metrics_source: str = "factor_evaluation_service",
+    ) -> FactorEvaluationResult | None:
+        if panel_df.empty or factor_series is None:
+            return None
+
+        clean_panel = panel_df.copy()
+        clean_panel["factor"] = pd.to_numeric(
+            factor_series.reindex(clean_panel.index) if isinstance(factor_series, pd.Series) else pd.Series(factor_series, index=clean_panel.index),
+            errors="coerce",
+        )
+        close_series = pd.to_numeric(clean_panel["close"], errors="coerce")
+        if "stock_code" in clean_panel.columns:
+            future_return = close_series.groupby(clean_panel["stock_code"]).pct_change(holding_period).shift(-holding_period)
+        else:
+            future_return = close_series.pct_change(holding_period).shift(-holding_period)
+        clean_panel["future_return"] = future_return
+        date_column = "trade_date" if "trade_date" in clean_panel.columns else "date"
+        clean_panel["date"] = pd.to_datetime(clean_panel[date_column], errors="coerce")
+
+        return self._evaluate_panel(
+            panel=clean_panel[["date", "stock_code", "factor", "future_return"]],
+            expression=expression,
+            prompt=prompt,
+            benchmark=benchmark,
+            n_groups=n_groups,
+            holding_period=holding_period,
+            direction=direction,
+            benchmark_loader=benchmark_loader,
+            report_writer=report_writer,
+            engine_type=engine_type,
+            dialect=dialect,
+            canonical_expression=canonical_expression,
+            canonical_ast=canonical_ast,
+            diagnostics=diagnostics,
+            start_date=start_date,
+            end_date=end_date,
+            metrics_source=metrics_source,
+            execution_meta=execution_meta,
         )
 
     def compute_component_scores(

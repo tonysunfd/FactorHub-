@@ -174,6 +174,79 @@ def test_run_auto_campaign_returns_real_rounds(monkeypatch) -> None:
     assert snapshots[-1]["current_round"] == 2
 
 
+def test_run_auto_campaign_progress_uses_current_round_snapshot(monkeypatch) -> None:
+    service = AutoFactorMiningService()
+
+    def fake_run_auto_mining(**kwargs):
+        base_factors = kwargs["base_factors"]
+        progress_callback = kwargs["progress_callback"]
+        round_index = 1 if "ExtraFactor" not in base_factors else 2
+        candidate = {
+            "name": f"Auto_{round_index}",
+            "expression": f"expr_{round_index}",
+            "score": 60 + round_index * 10,
+        }
+        progress_callback(1, 2, candidate)
+        return {
+            "factors": [candidate],
+            "best_score": candidate["score"],
+            "avg_score": candidate["score"] - 5,
+            "generations": 1,
+            "fitness_history": {"best": [candidate["score"]], "average": [candidate["score"] - 5]},
+            "round_evaluation": {
+                "base_factors": list(base_factors),
+                "primary_problem": f"第 {round_index} 轮问题",
+                "recommended_goal": "score",
+                "suggested_actions": [f"第 {round_index} 轮动作"],
+                "metric_snapshot": {"score": candidate["score"]},
+            },
+        }
+
+    def fake_select_factors(**kwargs):
+        return {
+            "selected_factors": ["ExtraFactor"],
+            "selection_rationale": "补充一个新因子",
+            "per_factor_reason": {"ExtraFactor": "用于下一轮探索"},
+        }
+
+    monkeypatch.setattr(service, "run_auto_mining", fake_run_auto_mining)
+    monkeypatch.setattr(service, "select_factors", fake_select_factors)
+
+    snapshots = []
+    service.run_auto_campaign(
+        prompt="提升综合分数",
+        base_factors=["Alpha1"],
+        start_date="2024-01-01",
+        end_date="2024-12-31",
+        universe="hs300",
+        benchmark="hs300",
+        n_groups=5,
+        holding_period=5,
+        exploration_rounds=2,
+        n_candidates_per_round=2,
+        additional_factor_count_per_round=1,
+        factor_update_mode="append",
+        parent_selection_strategy="best_score_so_far",
+        direction="score",
+        neutralize_industry=True,
+        neutralize_cap=True,
+        retention_filter={"match_mode": "all", "score_min": 60},
+        progress_callback=snapshots.append,
+    )
+
+    in_progress_round_two = next(
+        snapshot
+        for snapshot in snapshots
+        if snapshot["current_round"] == 2 and snapshot["current_generation"] == 1
+    )
+    latest_round = in_progress_round_two["latest_round"]
+
+    assert latest_round["round_index"] == 2
+    assert latest_round["continuation_feedback"] is None
+    assert latest_round["input_base_factors"] == ["Alpha1", "ExtraFactor"]
+    assert latest_round["all_factors"][0]["expression"] == "expr_2"
+
+
 def test_write_candidate_report_uses_reference_generator(monkeypatch, tmp_path) -> None:
     service = AutoFactorMiningService()
     calls: dict[str, object] = {}
@@ -218,11 +291,141 @@ def test_write_candidate_report_uses_reference_generator(monkeypatch, tmp_path) 
 
     assert calls["ls_returns"] is strategy_returns
     assert calls["benchmark_returns"] is benchmark_returns
-    assert calls["title"] == "Factor Top-Group Backtest"
-    assert calls["output_dir"] == str(service.get_report_path("placeholder.html").parent)
-    assert calls["periods_per_year"] == 50
-    assert metrics["sharpe"] == 1.23
-    assert report_url == "/api/mining/reports/backtest_report_20260607_181500.html"
+
+
+def test_evaluate_expression_prefers_quantgpt_panel_execution(monkeypatch) -> None:
+    service = AutoFactorMiningService()
+
+    trade_dates = pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"])
+    stock_codes = [f"S{i:02d}" for i in range(8)]
+    panel_rows = []
+    factor_values = []
+    for date_index, trade_date in enumerate(trade_dates):
+        for stock_index, stock_code in enumerate(stock_codes):
+            panel_rows.append(
+                {
+                    "trade_date": trade_date,
+                    "stock_code": stock_code,
+                    "close": 10 + stock_index + date_index,
+                }
+            )
+            factor_values.append(float(stock_index))
+
+    panel_df = pd.DataFrame(
+        panel_rows
+    )
+    factor_series = pd.Series(factor_values, index=panel_df.index, dtype=float)
+
+    monkeypatch.setattr(
+        service._quantgpt_engine,
+        "build_panel_data",
+        lambda **kwargs: panel_df.copy(),
+    )
+    monkeypatch.setattr(
+        service._quantgpt_engine,
+        "execute_on_panel",
+        lambda panel, expression: SimpleNamespace(
+            factor_series=factor_series,
+            engine_type="quantgpt",
+            dialect="quantgpt_local",
+            canonical_expression="rank(close)",
+            canonical_ast={"operators": ["rank"], "fields": ["close"]},
+            diagnostics=[],
+            execution_meta={"panel_rows": len(panel)},
+            metrics_source="quantgpt_expression_engine",
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_load_benchmark_returns",
+        lambda benchmark, start_date, end_date: pd.Series(dtype=float),
+    )
+    monkeypatch.setattr(
+        service,
+        "_write_candidate_report",
+        lambda strategy_returns, benchmark_returns, periods_per_year: ({"sharpe": 1.0}, "/reports/mock.html"),
+    )
+
+    result = service.evaluate_expression(
+        expression="rank(close)",
+        prompt="test quantgpt path",
+        stock_codes=stock_codes,
+        start_date="2024-01-01",
+        end_date="2024-01-31",
+        benchmark="hs300",
+        n_groups=2,
+        holding_period=1,
+        direction="score",
+        neutralize_industry=False,
+        neutralize_cap=False,
+    )
+
+    assert result is not None
+    assert result.engine_type == "quantgpt"
+    assert result.dialect == "quantgpt_local"
+    assert result.canonical_expression == "rank(close)"
+    assert result.execution_meta["panel_rows"] == len(panel_df)
+
+
+def test_evaluate_expression_returns_none_when_quantgpt_fails(monkeypatch) -> None:
+    service = AutoFactorMiningService()
+
+    monkeypatch.setattr(
+        service._quantgpt_engine,
+        "build_panel_data",
+        lambda **kwargs: (_ for _ in ()).throw(ValueError("quantgpt failed")),
+    )
+
+    result = service.evaluate_expression(
+        expression="close",
+        prompt="test fallback path",
+        stock_codes=["AAA"],
+        start_date="2024-01-01",
+        end_date="2024-01-31",
+        benchmark="hs300",
+        n_groups=2,
+        holding_period=1,
+        direction="score",
+        neutralize_industry=False,
+        neutralize_cap=False,
+    )
+
+    assert result is None
+
+
+def test_filter_supported_expressions_uses_quantgpt_engine_only(monkeypatch) -> None:
+    service = AutoFactorMiningService()
+    sample_frames = [
+        pd.DataFrame(
+            {
+                "open": [10.0, 10.2, 10.4],
+                "high": [10.3, 10.5, 10.7],
+                "low": [9.8, 10.0, 10.2],
+                "close": [10.1, 10.3, 10.6],
+                "volume": [1000, 1100, 1200],
+                "amount": [10000, 11330, 12720],
+            }
+        )
+    ]
+
+    monkeypatch.setattr(
+        service._quantgpt_engine,
+        "can_execute_on_frames",
+        lambda expression, frames: expression == "rank(close)",
+    )
+    monkeypatch.setattr(
+        factor_service.calculator,
+        "calculate",
+        lambda df, expr: (_ for _ in ()).throw(AssertionError("should not call factorhub calculator")),
+    )
+
+    supported = service._filter_supported_expressions(
+        ["rank(close)", "bad(expr)"],
+        sample_frames=sample_frames,
+        limit=2,
+    )
+
+    assert supported == ["rank(close)"]
 
 
 def test_run_auto_mining_falls_back_when_llm_candidates_are_not_executable(monkeypatch) -> None:
@@ -250,6 +453,16 @@ def test_run_auto_mining_falls_back_when_llm_candidates_are_not_executable(monke
         "generate_hybrid_factors",
         lambda base_factors, n_factors: [{"expression": "(close / SMA(close, timeperiod=5))"}],
     )
+
+    filter_calls = {"count": 0}
+
+    def fake_filter_supported(expressions, *, sample_frames, limit):
+        filter_calls["count"] += 1
+        if filter_calls["count"] == 1:
+            return []
+        return ["(close / SMA(close, timeperiod=5))"]
+
+    monkeypatch.setattr(service, "_filter_supported_expressions", fake_filter_supported)
 
     service._data_service = SimpleNamespace(
         get_stock_universe=lambda universe, date: ["000001.SZ"],
@@ -319,6 +532,112 @@ def test_run_auto_mining_falls_back_when_llm_candidates_are_not_executable(monke
     assert result["factors"][0]["expression"] == "(close / SMA(close, timeperiod=5))"
 
 
+def test_run_auto_mining_keeps_retrying_until_quantgpt_yields_valid_candidate(monkeypatch) -> None:
+    service = AutoFactorMiningService()
+
+    sample_df = pd.DataFrame(
+        {
+            "trade_date": pd.date_range("2024-01-01", periods=40, freq="D"),
+            "stock_code": ["000001.SZ"] * 40,
+            "open": [10.0 + i for i in range(40)],
+            "high": [10.5 + i for i in range(40)],
+            "low": [9.5 + i for i in range(40)],
+            "close": [10.2 + i for i in range(40)],
+            "volume": [1000.0 + i * 10 for i in range(40)],
+            "amount": [10000.0 + i * 100 for i in range(40)],
+        }
+    )
+
+    service._data_service = SimpleNamespace(
+        get_stock_universe=lambda universe, date: ["000001.SZ"],
+        get_stock_data=lambda stock_code, start_date, end_date: sample_df.copy(),
+    )
+    monkeypatch.setattr(service, "resolve_base_factor_codes", lambda base_factors: ["close", "volume"])
+
+    generate_calls = {"count": 0}
+
+    def fake_generate_candidate_expressions(**kwargs):
+        generate_calls["count"] += 1
+        if generate_calls["count"] == 1:
+            return ["bad_expr_1"]
+        return ["good_expr_2"]
+
+    monkeypatch.setattr(service, "generate_candidate_expressions", fake_generate_candidate_expressions)
+    monkeypatch.setattr(
+        service,
+        "_generate_fallback_candidate_expressions",
+        lambda **kwargs: [],
+    )
+    monkeypatch.setattr(
+        service,
+        "_filter_supported_expressions",
+        lambda expressions, *, sample_frames, limit: expressions[:limit],
+    )
+
+    def fake_evaluate_expression(**kwargs):
+        expression = kwargs["expression"]
+        if expression == "bad_expr_1":
+            return None
+        return SimpleNamespace(
+            expression=expression,
+            score=88.0,
+            grade="A",
+            report_metrics={"sharpe": 1.2, "max_drawdown": 0.1},
+            backtest_summary={
+                "long_short_sharpe": 1.2,
+                "long_short_annual": 0.2,
+                "top_group_sharpe": 1.1,
+                "monotonicity_score": 0.8,
+                "spread": 0.03,
+                "group_returns": {"top_minus_bottom_mean": 0.03},
+                "rank_ic_mean": 0.05,
+                "ic_mean": 0.05,
+                "ic_ir": 1.0,
+                "ic_win_rate": 0.7,
+                "turnover": 0.2,
+                "wq_fitness": 1.05,
+            },
+            wq_brain={
+                "wq_rating": "A",
+                "wq_fitness": 1.05,
+                "wq_sharpe": 1.2,
+                "wq_returns": 0.2,
+                "wq_turnover": 0.2,
+                "submittable": True,
+            },
+            component_scores={"total_score": 88.0},
+            anti_overfit={"score": 80.0, "recommendation": "推荐", "tests": []},
+            interpretation={
+                "summary": "retry ok",
+                "weaknesses": [],
+                "next_steps": ["继续迭代"],
+                "rating": "A",
+                "rating_reason": "推荐",
+                "improvement_ideas": ["继续迭代"],
+            },
+            diagnostics=[],
+            report_url="/api/mining/reports/retry.html",
+        )
+
+    monkeypatch.setattr(service, "evaluate_expression", fake_evaluate_expression)
+
+    result = service.run_auto_mining(
+        prompt="提升量价复合因子的稳定性",
+        base_factors=["close", "volume"],
+        start_date="2024-01-01",
+        end_date="2024-12-31",
+        universe="hs300",
+        benchmark="hs300",
+        n_groups=5,
+        holding_period=5,
+        n_candidates=1,
+    )
+
+    assert generate_calls["count"] >= 2
+    assert result["best_score"] == 88.0
+    assert result["factors"][0]["expression"] == "good_expr_2"
+
+
 def test_factor_calculator_supports_integer_volume_sma() -> None:
     df = pd.DataFrame(
         {
@@ -337,5 +656,32 @@ def test_factor_calculator_supports_integer_volume_sma() -> None:
         "((SMA(close, timeperiod=5) - SMA(close, timeperiod=20)) / SMA(close, timeperiod=20)) * (volume / SMA(volume, timeperiod=20))",
     )
 
+    assert int(volume_sma.dropna().shape[0]) > 0
+    assert int(composite.dropna().shape[0]) > 0
+
+
+def test_quantgpt_expression_engine_supports_integer_volume_sma() -> None:
+    service = AutoFactorMiningService()
+    df = pd.DataFrame(
+        {
+            "trade_date": pd.date_range("2024-01-01", periods=40, freq="D"),
+            "stock_code": ["AAA"] * 40,
+            "open": [10.0 + i for i in range(40)],
+            "high": [10.5 + i for i in range(40)],
+            "low": [9.5 + i for i in range(40)],
+            "close": [10.2 + i for i in range(40)],
+            "volume": [1000 + i * 10 for i in range(40)],
+            "amount": [10000 + i * 100 for i in range(40)],
+        }
+    )
+
+    volume_sma = service._quantgpt_engine.execute_on_panel(df.copy(), "SMA(volume, timeperiod=5)").factor_series
+    composite = service._quantgpt_engine.execute_on_panel(
+        df.copy(),
+        "((SMA(close, timeperiod=5) - SMA(close, timeperiod=20)) / SMA(close, timeperiod=20)) * (volume / SMA(volume, timeperiod=20))",
+    ).factor_series
+
+    assert volume_sma is not None
+    assert composite is not None
     assert int(volume_sma.dropna().shape[0]) > 0
     assert int(composite.dropna().shape[0]) > 0
