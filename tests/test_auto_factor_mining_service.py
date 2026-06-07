@@ -367,7 +367,7 @@ def test_evaluate_expression_prefers_quantgpt_panel_execution(monkeypatch) -> No
     assert result.execution_meta["panel_rows"] == len(panel_df)
 
 
-def test_evaluate_expression_returns_none_when_quantgpt_fails(monkeypatch) -> None:
+def test_evaluate_expression_falls_back_when_quantgpt_fails(monkeypatch) -> None:
     service = AutoFactorMiningService()
 
     monkeypatch.setattr(
@@ -375,11 +375,37 @@ def test_evaluate_expression_returns_none_when_quantgpt_fails(monkeypatch) -> No
         "build_panel_data",
         lambda **kwargs: (_ for _ in ()).throw(ValueError("quantgpt failed")),
     )
+    monkeypatch.setattr(
+        factor_service.calculator,
+        "calculate",
+        lambda df, expr: pd.to_numeric(df["close"], errors="coerce").astype(float),
+    )
+    monkeypatch.setattr(
+        service,
+        "_load_benchmark_returns",
+        lambda benchmark, start_date, end_date: pd.Series(dtype=float),
+    )
+    monkeypatch.setattr(
+        service,
+        "_write_candidate_report",
+        lambda strategy_returns, benchmark_returns, periods_per_year: ({"sharpe": 1.0}, "/reports/mock.html"),
+    )
+
+    stock_codes = [f"S{i:03d}" for i in range(12)]
+    trade_dates = pd.date_range("2024-01-01", periods=40, freq="D")
+    service._data_service = SimpleNamespace(
+        get_stock_data=lambda stock_code, start_date, end_date: pd.DataFrame(
+            {
+                "close": [10.0 + i + (0.2 * stock_codes.index(stock_code)) for i in range(40)],
+            },
+            index=trade_dates,
+        )
+    )
 
     result = service.evaluate_expression(
         expression="close",
         prompt="test fallback path",
-        stock_codes=["AAA"],
+        stock_codes=stock_codes,
         start_date="2024-01-01",
         end_date="2024-01-31",
         benchmark="hs300",
@@ -390,7 +416,63 @@ def test_evaluate_expression_returns_none_when_quantgpt_fails(monkeypatch) -> No
         neutralize_cap=False,
     )
 
-    assert result is None
+    assert result is not None
+    assert result.engine_type == "factorhub"
+    assert result.diagnostics[0]["label"] == "执行器回退"
+
+
+def test_evaluate_expression_falls_back_when_quantgpt_panel_is_empty(monkeypatch) -> None:
+    service = AutoFactorMiningService()
+
+    monkeypatch.setattr(
+        service._quantgpt_engine,
+        "build_panel_data",
+        lambda **kwargs: pd.DataFrame(),
+    )
+    monkeypatch.setattr(
+        factor_service.calculator,
+        "calculate",
+        lambda df, expr: pd.to_numeric(df["close"], errors="coerce").astype(float),
+    )
+    monkeypatch.setattr(
+        service,
+        "_load_benchmark_returns",
+        lambda benchmark, start_date, end_date: pd.Series(dtype=float),
+    )
+    monkeypatch.setattr(
+        service,
+        "_write_candidate_report",
+        lambda strategy_returns, benchmark_returns, periods_per_year: ({"sharpe": 1.0}, "/reports/mock.html"),
+    )
+
+    stock_codes = [f"S{i:03d}" for i in range(12)]
+    trade_dates = pd.date_range("2024-01-01", periods=40, freq="D")
+    service._data_service = SimpleNamespace(
+        get_stock_data=lambda stock_code, start_date, end_date: pd.DataFrame(
+            {
+                "close": [10.0 + i + (0.2 * stock_codes.index(stock_code)) for i in range(40)],
+            },
+            index=trade_dates,
+        )
+    )
+
+    result = service.evaluate_expression(
+        expression="close",
+        prompt="test empty panel fallback",
+        stock_codes=stock_codes,
+        start_date="2024-01-01",
+        end_date="2024-01-31",
+        benchmark="hs300",
+        n_groups=2,
+        holding_period=1,
+        direction="score",
+        neutralize_industry=False,
+        neutralize_cap=False,
+    )
+
+    assert result is not None
+    assert result.engine_type == "factorhub"
+    assert result.diagnostics[0]["label"] == "执行器回退"
 
 
 def test_filter_supported_expressions_uses_quantgpt_engine_only(monkeypatch) -> None:
@@ -573,6 +655,11 @@ def test_run_auto_mining_keeps_retrying_until_quantgpt_yields_valid_candidate(mo
         "_filter_supported_expressions",
         lambda expressions, *, sample_frames, limit: expressions[:limit],
     )
+    monkeypatch.setattr(
+        factor_service.calculator,
+        "calculate",
+        lambda df, expr: pd.Series(range(len(df)), index=df.index, dtype=float),
+    )
 
     def fake_evaluate_expression(**kwargs):
         expression = kwargs["expression"]
@@ -636,6 +723,75 @@ def test_run_auto_mining_keeps_retrying_until_quantgpt_yields_valid_candidate(mo
     assert generate_calls["count"] >= 2
     assert result["best_score"] == 88.0
     assert result["factors"][0]["expression"] == "good_expr_2"
+
+
+def test_run_auto_mining_accepts_bound_benchmark_and_report_helpers(monkeypatch) -> None:
+    service = AutoFactorMiningService()
+
+    trade_dates = pd.date_range("2024-01-01", periods=40, freq="D")
+    stock_codes = [f"{i:06d}.SZ" for i in range(1, 9)]
+    service._data_service = SimpleNamespace(
+        get_stock_universe=lambda universe, date: stock_codes,
+        get_stock_data=lambda stock_code, start_date, end_date: pd.DataFrame(
+            {
+                "stock_code": [stock_code] * 40,
+                "open": [10.0 + i + (0.2 * stock_codes.index(stock_code)) for i in range(40)],
+                "high": [10.5 + i + (0.2 * stock_codes.index(stock_code)) for i in range(40)],
+                "low": [9.5 + i + (0.2 * stock_codes.index(stock_code)) for i in range(40)],
+                "close": [10.2 + i + (0.2 * stock_codes.index(stock_code)) for i in range(40)],
+                "volume": [1000.0 + i * 10 + (20 * stock_codes.index(stock_code)) for i in range(40)],
+                "amount": [10000.0 + i * 100 + (200 * stock_codes.index(stock_code)) for i in range(40)],
+            },
+            index=trade_dates,
+        ),
+        get_benchmark_returns=lambda benchmark, start_date, end_date: pd.DataFrame(
+            {
+                "trade_date": trade_dates,
+                "daily_return": [0.001] * 40,
+            }
+        ),
+    )
+
+    monkeypatch.setattr(service, "resolve_base_factor_codes", lambda base_factors: ["close"])
+    monkeypatch.setattr(
+        service,
+        "generate_candidate_expressions",
+        lambda **kwargs: ["rank(close)"],
+    )
+    monkeypatch.setattr(
+        service,
+        "_filter_supported_expressions",
+        lambda expressions, *, sample_frames, limit: expressions[:limit],
+    )
+    monkeypatch.setattr(
+        factor_service.calculator,
+        "calculate",
+        lambda df, expr: pd.to_numeric(df["close"], errors="coerce").astype(float),
+    )
+    monkeypatch.setattr(
+        service,
+        "_write_candidate_report",
+        lambda strategy_returns, benchmark_returns, periods_per_year: (
+            {"sharpe": 1.0, "max_drawdown": 0.1},
+            "/api/mining/reports/mock.html",
+        ),
+    )
+
+    result = service.run_auto_mining(
+        prompt="提升量价复合因子的稳定性",
+        base_factors=["close"],
+        start_date="2024-01-01",
+        end_date="2024-02-29",
+        universe="hs300",
+        benchmark="hs300",
+        n_groups=2,
+        holding_period=1,
+        n_candidates=1,
+    )
+
+    assert result["best_score"] >= 0
+    assert len(result["factors"]) == 1
+    assert result["factors"][0]["expression"] == "rank(close)"
 
 
 def test_factor_calculator_supports_integer_volume_sma() -> None:
