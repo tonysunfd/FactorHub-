@@ -10,6 +10,7 @@ import pandas as pd
 
 from backend.data.enrichment import ALL_SUPPORTED_VARIABLES, market_data_enrichment_service
 from backend.services.expression_schema import EngineExecutionResult
+from backend.services.research_tools.expression_adapter import ExpressionAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -592,9 +593,10 @@ class QuantGPTExpressionEngine:
 
     def compile_expression(self, expression: str) -> QuantGPTExecutionArtifacts:
         parser = ExpressionParser()
-        evaluator = parser.parse(expression)
-        canonical_expression = normalize_expression(expression)
-        canonical_ast = extract_components(expression)
+        adapted_expression = ExpressionAdapter.adapt(expression)
+        evaluator = parser.parse(adapted_expression)
+        canonical_expression = normalize_expression(adapted_expression)
+        canonical_ast = extract_components(adapted_expression)
         return QuantGPTExecutionArtifacts(
             canonical_expression=canonical_expression,
             canonical_ast=canonical_ast,
@@ -602,7 +604,8 @@ class QuantGPTExpressionEngine:
         )
 
     def detect_needed_vars(self, expression: str) -> set[str]:
-        return market_data_enrichment_service.detect_variables([expression])
+        adapted_expression = ExpressionAdapter.adapt(expression)
+        return market_data_enrichment_service.detect_variables([adapted_expression])
 
     def build_panel_data(
         self,
@@ -680,7 +683,12 @@ class QuantGPTExpressionEngine:
                 frame["trade_date"] = pd.to_datetime(frame["date"], errors="coerce")
             elif frame.index.name in {"date", "trade_date"} or isinstance(frame.index, pd.DatetimeIndex):
                 frame = frame.reset_index()
-                source_col = "trade_date" if "trade_date" in frame.columns else "date"
+                if "trade_date" in frame.columns:
+                    source_col = "trade_date"
+                elif "date" in frame.columns:
+                    source_col = "date"
+                else:
+                    source_col = frame.columns[0]
                 frame["trade_date"] = pd.to_datetime(frame[source_col], errors="coerce")
             else:
                 frame["trade_date"] = pd.to_datetime(frame.index, errors="coerce")

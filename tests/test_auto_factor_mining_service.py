@@ -367,7 +367,7 @@ def test_evaluate_expression_prefers_quantgpt_panel_execution(monkeypatch) -> No
     assert result.execution_meta["panel_rows"] == len(panel_df)
 
 
-def test_evaluate_expression_falls_back_when_quantgpt_fails(monkeypatch) -> None:
+def test_evaluate_expression_returns_none_when_quantgpt_fails(monkeypatch) -> None:
     service = AutoFactorMiningService()
 
     monkeypatch.setattr(
@@ -375,37 +375,11 @@ def test_evaluate_expression_falls_back_when_quantgpt_fails(monkeypatch) -> None
         "build_panel_data",
         lambda **kwargs: (_ for _ in ()).throw(ValueError("quantgpt failed")),
     )
-    monkeypatch.setattr(
-        factor_service.calculator,
-        "calculate",
-        lambda df, expr: pd.to_numeric(df["close"], errors="coerce").astype(float),
-    )
-    monkeypatch.setattr(
-        service,
-        "_load_benchmark_returns",
-        lambda benchmark, start_date, end_date: pd.Series(dtype=float),
-    )
-    monkeypatch.setattr(
-        service,
-        "_write_candidate_report",
-        lambda strategy_returns, benchmark_returns, periods_per_year: ({"sharpe": 1.0}, "/reports/mock.html"),
-    )
-
-    stock_codes = [f"S{i:03d}" for i in range(12)]
-    trade_dates = pd.date_range("2024-01-01", periods=40, freq="D")
-    service._data_service = SimpleNamespace(
-        get_stock_data=lambda stock_code, start_date, end_date: pd.DataFrame(
-            {
-                "close": [10.0 + i + (0.2 * stock_codes.index(stock_code)) for i in range(40)],
-            },
-            index=trade_dates,
-        )
-    )
 
     result = service.evaluate_expression(
         expression="close",
-        prompt="test fallback path",
-        stock_codes=stock_codes,
+        prompt="test invalid path",
+        stock_codes=["S001"],
         start_date="2024-01-01",
         end_date="2024-01-31",
         benchmark="hs300",
@@ -416,12 +390,10 @@ def test_evaluate_expression_falls_back_when_quantgpt_fails(monkeypatch) -> None
         neutralize_cap=False,
     )
 
-    assert result is not None
-    assert result.engine_type == "factorhub"
-    assert result.diagnostics[0]["label"] == "执行器回退"
+    assert result is None
 
 
-def test_evaluate_expression_falls_back_when_quantgpt_panel_is_empty(monkeypatch) -> None:
+def test_evaluate_expression_returns_none_when_quantgpt_panel_is_empty(monkeypatch) -> None:
     service = AutoFactorMiningService()
 
     monkeypatch.setattr(
@@ -429,37 +401,11 @@ def test_evaluate_expression_falls_back_when_quantgpt_panel_is_empty(monkeypatch
         "build_panel_data",
         lambda **kwargs: pd.DataFrame(),
     )
-    monkeypatch.setattr(
-        factor_service.calculator,
-        "calculate",
-        lambda df, expr: pd.to_numeric(df["close"], errors="coerce").astype(float),
-    )
-    monkeypatch.setattr(
-        service,
-        "_load_benchmark_returns",
-        lambda benchmark, start_date, end_date: pd.Series(dtype=float),
-    )
-    monkeypatch.setattr(
-        service,
-        "_write_candidate_report",
-        lambda strategy_returns, benchmark_returns, periods_per_year: ({"sharpe": 1.0}, "/reports/mock.html"),
-    )
-
-    stock_codes = [f"S{i:03d}" for i in range(12)]
-    trade_dates = pd.date_range("2024-01-01", periods=40, freq="D")
-    service._data_service = SimpleNamespace(
-        get_stock_data=lambda stock_code, start_date, end_date: pd.DataFrame(
-            {
-                "close": [10.0 + i + (0.2 * stock_codes.index(stock_code)) for i in range(40)],
-            },
-            index=trade_dates,
-        )
-    )
 
     result = service.evaluate_expression(
         expression="close",
-        prompt="test empty panel fallback",
-        stock_codes=stock_codes,
+        prompt="test empty panel invalid",
+        stock_codes=["S001"],
         start_date="2024-01-01",
         end_date="2024-01-31",
         benchmark="hs300",
@@ -470,9 +416,51 @@ def test_evaluate_expression_falls_back_when_quantgpt_panel_is_empty(monkeypatch
         neutralize_cap=False,
     )
 
-    assert result is not None
-    assert result.engine_type == "factorhub"
-    assert result.diagnostics[0]["label"] == "执行器回退"
+    assert result is None
+
+
+def test_quantgpt_engine_adapts_generator_dialect_before_execution() -> None:
+    service = AutoFactorMiningService()
+
+    frame = pd.DataFrame(
+        {
+            "trade_date": pd.date_range("2024-01-01", periods=6, freq="D"),
+            "stock_code": ["S001"] * 6,
+            "close": [10.0, 11.0, 13.0, 12.0, 14.0, 15.0],
+            "volume": [100.0, 120.0, 140.0, 160.0, 180.0, 200.0],
+        }
+    )
+
+    result = service._quantgpt_engine.execute_on_panel(frame, "Ref($close, 1)")
+
+    assert result.factor_series is not None
+    assert result.canonical_expression == "ts_shift(close,1)"
+    assert float(result.factor_series.iloc[2]) == 11.0
+
+
+def test_quantgpt_engine_builds_panel_from_unnamed_datetime_index() -> None:
+    service = AutoFactorMiningService()
+
+    raw_frame = pd.DataFrame(
+        {
+            "close": [10.0, 11.0, 12.0],
+            "volume": [100.0, 120.0, 140.0],
+            "amount": [1000.0, 1320.0, 1680.0],
+        },
+        index=pd.date_range("2024-01-01", periods=3, freq="D"),
+    )
+
+    panel = service._quantgpt_engine.build_panel_data(
+        stock_codes=["S001"],
+        start_date="2024-01-01",
+        end_date="2024-01-03",
+        expression="rank(close)",
+        stock_data_loader=lambda stock_code, start_date, end_date: raw_frame.copy(),
+    )
+
+    assert not panel.empty
+    assert "trade_date" in panel.columns
+    assert panel["trade_date"].notna().all()
 
 
 def test_filter_supported_expressions_uses_quantgpt_engine_only(monkeypatch) -> None:

@@ -20,7 +20,6 @@ from backend.repositories.factor_repository import FactorRepository
 from backend.services.expression_schema import FactorEvaluationResult
 from backend.services.factor_evaluation_service import FactorEvaluationService
 from backend.services.factor_generator_service import factor_generator_service
-from backend.services.factor_service import factor_service
 from backend.services.quantgpt_expression_engine import QuantGPTExpressionEngine
 from backend.services.report_service import generate_report
 from backend.services.llm_config_service import llm_config_service
@@ -998,7 +997,6 @@ class AutoFactorMiningService:
         neutralize_cap: bool,
     ) -> FactorEvaluationResult | None:
         del neutralize_industry, neutralize_cap
-        fallback_reason: str | None = None
         try:
             panel_df = self._quantgpt_engine.build_panel_data(
                 stock_codes=stock_codes,
@@ -1008,70 +1006,39 @@ class AutoFactorMiningService:
                 stock_data_loader=self.data_service.get_stock_data,
             )
             if panel_df.empty:
-                fallback_reason = f"QuantGPT 未构建出有效 panel：{expression}"
-                logger.info("QuantGPT 执行器未构建出有效 panel，回退到原有评估链：%s", expression)
-            else:
-                execution = self._quantgpt_engine.execute_on_panel(panel_df, expression)
-                panel_result = self._factor_evaluation_service.evaluate_factor_panel(
-                    expression=expression,
-                    prompt=prompt,
-                    panel_df=panel_df,
-                    factor_series=execution.factor_series if execution.factor_series is not None else pd.Series(dtype=float),
-                    benchmark=benchmark,
-                    start_date=start_date,
-                    end_date=end_date,
-                    n_groups=n_groups,
-                    holding_period=holding_period,
-                    direction=direction,
-                    benchmark_loader=self._load_benchmark_returns,
-                    report_writer=self._write_candidate_report,
-                    engine_type=execution.engine_type,
-                    dialect=execution.dialect,
-                    canonical_expression=execution.canonical_expression,
-                    canonical_ast=execution.canonical_ast,
-                    diagnostics=execution.diagnostics,
-                    execution_meta=execution.execution_meta,
-                    metrics_source=execution.metrics_source,
-                )
-                if panel_result is not None:
-                    return panel_result
+                logger.info("QuantGPT 执行器未构建出有效 panel，候选失效：%s", expression)
+                return None
 
-                fallback_reason = f"QuantGPT 面板评估未产出有效结果：{expression}"
-                logger.info("QuantGPT 面板评估未产出有效结果，回退到原有评估链：%s", expression)
-        except Exception as exc:
-            logger.warning("QuantGPT 执行器评估失败，回退到原有评估链 %s：%s", expression, exc)
-            fallback_reason = f"QuantGPT 执行失败，已回退到 FactorHub 原生评估链：{expression}"
+            execution = self._quantgpt_engine.execute_on_panel(panel_df, expression)
+            panel_result = self._factor_evaluation_service.evaluate_factor_panel(
+                expression=expression,
+                prompt=prompt,
+                panel_df=panel_df,
+                factor_series=execution.factor_series if execution.factor_series is not None else pd.Series(dtype=float),
+                benchmark=benchmark,
+                start_date=start_date,
+                end_date=end_date,
+                n_groups=n_groups,
+                holding_period=holding_period,
+                direction=direction,
+                benchmark_loader=self._load_benchmark_returns,
+                report_writer=self._write_candidate_report,
+                engine_type=execution.engine_type,
+                dialect=execution.dialect,
+                canonical_expression=execution.canonical_expression,
+                canonical_ast=execution.canonical_ast,
+                diagnostics=execution.diagnostics,
+                execution_meta=execution.execution_meta,
+                metrics_source=execution.metrics_source,
+            )
+            if panel_result is not None:
+                return panel_result
 
-        fallback_result = self._factor_evaluation_service.evaluate_factor_expression(
-            expression=expression,
-            prompt=prompt,
-            stock_codes=stock_codes,
-            start_date=start_date,
-            end_date=end_date,
-            benchmark=benchmark,
-            n_groups=n_groups,
-            holding_period=holding_period,
-            direction=direction,
-            stock_data_loader=self.data_service.get_stock_data,
-            expression_executor=lambda df, expr: factor_service.calculator.calculate(df.copy(), expr),
-            benchmark_loader=self._load_benchmark_returns,
-            report_writer=self._write_candidate_report,
-            engine_type="factorhub",
-            dialect="factorhub_native",
-            canonical_expression=None,
-            canonical_ast=None,
-        )
-        if fallback_result is None:
+            logger.info("QuantGPT 面板评估未产出有效结果，候选失效：%s", expression)
             return None
-        fallback_result.diagnostics.insert(
-            0,
-            {
-                "type": "warning",
-                "label": "执行器回退",
-                "text": fallback_reason or f"QuantGPT 执行失败，已回退到 FactorHub 原生评估链：{expression}",
-            },
-        )
-        return fallback_result
+        except Exception as exc:
+            logger.warning("QuantGPT 执行器评估失败，候选失效 %s：%s", expression, exc)
+            return None
 
     def _build_round_evaluation(
         self,
