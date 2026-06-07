@@ -2,7 +2,7 @@
 遗传算法因子挖掘服务 - 使用遗传算法自动发现最优因子
 """
 import logging
-from typing import List, Dict, Callable, Optional
+from typing import Any, Dict, List, Optional
 import pandas as pd
 import numpy as np
 import random
@@ -143,9 +143,27 @@ class GeneticFactorMiningService:
         """设置进度回调函数
 
         Args:
-            callback: 回调函数，签名为 callback(generation, total_generations, best_fitness, avg_fitness)
+            callback: 回调函数，签名为
+                callback(generation, total_generations, best_fitness, avg_fitness, candidate_snapshot)
         """
         self.progress_callback = callback
+
+    def _build_progress_snapshot(self, halloffame, limit: int = 5) -> list[dict[str, Any]]:
+        """构建当前代的候选快照，供前端实时展示。"""
+        snapshot: list[dict[str, Any]] = []
+        for index, individual in enumerate(list(halloffame)[:limit]):
+            actual_expr = self._convert_expression_to_code(individual[0])
+            fitness = 0.0
+            if getattr(individual, "fitness", None) is not None and getattr(individual.fitness, "values", None):
+                fitness = float(individual.fitness.values[0])
+            snapshot.append(
+                {
+                    "name": f"Snapshot_{index + 1}",
+                    "expression": actual_expr,
+                    "fitness": fitness,
+                }
+            )
+        return snapshot
 
     def _generate_random_individual(self):
         """生成随机个体（因子表达式）"""
@@ -591,7 +609,8 @@ class GeneticFactorMiningService:
             if self.progress_callback:
                 best_fitness = record.get("max", 0.0)
                 avg_fitness = record.get("avg", 0.0)
-                self.progress_callback(gen, self.n_generations, best_fitness, avg_fitness)
+                candidate_snapshot = self._build_progress_snapshot(halloffame)
+                self.progress_callback(gen, self.n_generations, best_fitness, avg_fitness, candidate_snapshot)
 
             logger.info(f"Generation {gen}/{self.n_generations} - Best: {record.get('max', 0):.4f}, Avg: {record.get('avg', 0):.4f}")
 

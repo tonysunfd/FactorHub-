@@ -1071,6 +1071,7 @@ const FactorMining: React.FC = () => {
         best_fitness: 0,
         avg_fitness: 0,
         fitness_history: { best: [], average: [] },
+        candidates: [],
       });
       setSavedFactorNames(new Set());
       setCurrentStockCode(String(values.stock_code || "").replace(".", ""));
@@ -3145,6 +3146,7 @@ const FactorMining: React.FC = () => {
       const bestFitness = currentStatus?.best_fitness ?? 0;
       const avgFitness = currentStatus?.avg_fitness ?? 0;
       const progressPercent = totalGenerations > 0 ? Math.round((currentGeneration / totalGenerations) * 100) : 0;
+      const runningManualCandidates = activeTab === "manual" ? (manualStatus?.candidates || []) : [];
       const runningAutoCandidates = isAutoLikeTab ? ((autoStatus as MiningStatus | null)?.candidates || []) : [];
       const seedResult = isAutoLikeTab ? autoSeedState?.result || null : null;
 
@@ -3201,6 +3203,32 @@ const FactorMining: React.FC = () => {
             <h4 className="chart-title">{activeTab === "manual" ? "进化曲线" : activeTab === "rdagent" ? "RDAgent 研究曲线" : "研究曲线"}</h4>
             <div ref={progressChartRef} className="chart-container" style={{ height: 300 }} />
           </div>
+          {activeTab === "manual" && runningManualCandidates.length ? (
+            <div style={{ marginTop: 24 }}>
+              <Divider />
+              <h3 className="result-title">当前最优候选</h3>
+              <div className="factors-list">
+                {runningManualCandidates.map((factor: any, index: number) => (
+                  <Card key={`${factor.expression || factor.name || index}-${index}`} className="factor-card" size="small">
+                    <div className="factor-header">
+                      <div className="factor-info">
+                        <Space>
+                          <Tag color="blue">实时 {index + 1}</Tag>
+                          <span className="factor-name">{factor.name || `Mined_Factor_${index + 1}`}</span>
+                        </Space>
+                        <div className="factor-expression">{factor.expression}</div>
+                      </div>
+                      <div className="factor-stats">
+                        <div className="stat-row"><span className="stat-label">Fitness:</span><span className="stat-value positive">{factor.fitness?.toFixed?.(4) || "0.0000"}</span></div>
+                        <div className="stat-row"><span className="stat-label">IC:</span><span className={`stat-value ${Number(factor.ic || 0) > 0 ? "positive" : "negative"}`}>{factor.ic?.toFixed?.(4) || "0.0000"}</span></div>
+                        <div className="stat-row"><span className="stat-label">IR:</span><span className={`stat-value ${Number(factor.ir || 0) > 0 ? "positive" : "negative"}`}>{factor.ir?.toFixed?.(4) || "0.0000"}</span></div>
+                      </div>
+                    </div>
+                  </Card>
+                ))}
+              </div>
+            </div>
+          ) : null}
           {isAutoLikeTab && runningAutoCandidates.length ? (
             <div style={{ marginTop: 24 }}>
               <Divider />

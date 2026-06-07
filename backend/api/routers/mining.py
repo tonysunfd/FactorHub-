@@ -110,6 +110,41 @@ def _safe_candidate_score(candidate: dict[str, Any]) -> float:
         return 0.0
 
 
+def _normalize_manual_candidate(candidate: dict[str, Any], index: int) -> dict[str, Any]:
+    return {
+        "name": candidate.get("name") or f"Mined_Factor_{index + 1}",
+        "expression": candidate.get("expression", ""),
+        "ic": float(candidate.get("ic", 0.0) or 0.0),
+        "ir": float(candidate.get("ir", 0.0) or 0.0),
+        "fitness": float(candidate.get("fitness", 0.0) or 0.0),
+    }
+
+
+def _store_manual_task_progress(
+    task_id: str,
+    generation: int,
+    total_generations: int,
+    best_fitness: float,
+    avg_fitness: float,
+    candidates: Optional[list[dict[str, Any]]] = None,
+) -> None:
+    progress = int(generation / max(total_generations, 1) * 100)
+    mining_tasks[task_id]["progress"] = progress
+    mining_tasks[task_id]["current_generation"] = generation
+    mining_tasks[task_id]["total_generations"] = total_generations
+    mining_tasks[task_id]["best_fitness"] = float(best_fitness)
+    mining_tasks[task_id]["avg_fitness"] = float(avg_fitness)
+    if "fitness_history" not in mining_tasks[task_id]:
+        mining_tasks[task_id]["fitness_history"] = {"best": [], "average": []}
+    mining_tasks[task_id]["fitness_history"]["best"].append(float(best_fitness))
+    mining_tasks[task_id]["fitness_history"]["average"].append(float(avg_fitness))
+    if candidates is not None:
+        mining_tasks[task_id]["candidates"] = [
+            _normalize_manual_candidate(candidate, index)
+            for index, candidate in enumerate(candidates)
+        ]
+
+
 def _create_task(kind: str) -> str:
     task_id = str(uuid.uuid4())
     mining_tasks[task_id] = {
@@ -442,6 +477,8 @@ async def _run_genetic_mining(task_id: str, request: GeneticMiningRequest):
         from backend.services.factor_service import factor_service
 
         mining_tasks[task_id]["status"] = "running"
+        mining_tasks[task_id]["request"] = request.model_dump()
+        mining_tasks[task_id]["candidates"] = []
 
         data = data_service.get_stock_data(request.stock_code, request.start_date, request.end_date)
         if data is None or len(data) == 0:
@@ -489,17 +526,15 @@ async def _run_genetic_mining(task_id: str, request: GeneticMiningRequest):
                 factor_calculator=factor_service.calculator,
             )
 
-            def progress_callback(gen, total_gen, best_fitness, avg_fitness):
-                progress = int(gen / total_gen * 100)
-                mining_tasks[task_id]["progress"] = progress
-                mining_tasks[task_id]["current_generation"] = gen
-                mining_tasks[task_id]["total_generations"] = total_gen
-                mining_tasks[task_id]["best_fitness"] = float(best_fitness)
-                mining_tasks[task_id]["avg_fitness"] = float(avg_fitness)
-                if "fitness_history" not in mining_tasks[task_id]:
-                    mining_tasks[task_id]["fitness_history"] = {"best": [], "average": []}
-                mining_tasks[task_id]["fitness_history"]["best"].append(float(best_fitness))
-                mining_tasks[task_id]["fitness_history"]["average"].append(float(avg_fitness))
+            def progress_callback(gen, total_gen, best_fitness, avg_fitness, candidates=None):
+                _store_manual_task_progress(
+                    task_id=task_id,
+                    generation=gen,
+                    total_generations=total_gen,
+                    best_fitness=best_fitness,
+                    avg_fitness=avg_fitness,
+                    candidates=candidates,
+                )
 
             mining_service.set_progress_callback(progress_callback)
             result = mining_service.mine_factors()
@@ -543,6 +578,11 @@ async def _run_genetic_mining(task_id: str, request: GeneticMiningRequest):
             mining_tasks[task_id]["status"] = "completed"
             mining_tasks[task_id]["progress"] = 100
             mining_tasks[task_id]["result"] = result_data
+            mining_tasks[task_id]["candidates"] = result_data["factors"]
+            mining_tasks[task_id]["current_generation"] = request.n_generations
+            mining_tasks[task_id]["total_generations"] = request.n_generations
+            mining_tasks[task_id]["best_fitness"] = result_data["best_fitness"]
+            mining_tasks[task_id]["avg_fitness"] = result_data["avg_fitness"]
             mining_tasks[task_id]["fitness_history"] = fitness_history
         except ImportError as exc:
             logger.warning("DEAP library not available, using simulation mode: %s", exc)
@@ -570,45 +610,50 @@ async def _run_simulated_mining(task_id: str, request: GeneticMiningRequest, dat
     n_generations = request.n_generations
     fitness_history = {"best": [], "average": []}
     current_best_fitness = 0.0
+    code_list = list(factor_values.keys())
+
+    def _build_simulated_candidates(limit: int) -> list[dict[str, Any]]:
+        discovered_factors = []
+        for index in range(min(limit, 5, len(code_list))):
+            base_code = code_list[index % len(code_list)]
+            if index == 0:
+                expression = f"({base_code} * 1.5)"
+            elif index == 1:
+                expression = f"({base_code} + close / open)"
+            elif index == 2:
+                expression = f"({base_code} * volume / 1000000)"
+            elif index == 3:
+                expression = f"({base_code} - SMA(close, 20))"
+            else:
+                expression = f"({base_code} / (close + 1))"
+
+            discovered_factors.append(
+                {
+                    "name": f"Mined_Factor_{index + 1}",
+                    "expression": expression,
+                    "ic": 0.03 + (index * 0.01),
+                    "ir": 0.5 + (index * 0.1),
+                    "fitness": 0.03 + (index * 0.01),
+                }
+            )
+        return discovered_factors
 
     for gen in range(n_generations):
-        progress = int((gen + 1) / n_generations * 100)
-        mining_tasks[task_id]["progress"] = progress
         current_best_fitness = 0.03 + (gen + 1) * 0.005 + (0.001 * (gen % 3))
         current_avg_fitness = current_best_fitness * (0.85 + 0.1 * (gen % 2))
         fitness_history["best"].append(current_best_fitness)
         fitness_history["average"].append(current_avg_fitness)
-        mining_tasks[task_id]["current_generation"] = gen + 1
-        mining_tasks[task_id]["total_generations"] = n_generations
-        mining_tasks[task_id]["best_fitness"] = current_best_fitness
-        mining_tasks[task_id]["avg_fitness"] = current_avg_fitness
-        mining_tasks[task_id]["fitness_history"] = fitness_history
+        _store_manual_task_progress(
+            task_id=task_id,
+            generation=gen + 1,
+            total_generations=n_generations,
+            best_fitness=current_best_fitness,
+            avg_fitness=current_avg_fitness,
+            candidates=_build_simulated_candidates(gen + 1),
+        )
         await asyncio.sleep(0.5)
 
-    discovered_factors = []
-    code_list = list(factor_values.keys())
-    for index in range(min(5, len(code_list))):
-        base_code = code_list[index % len(code_list)]
-        if index == 0:
-            expression = f"({base_code} * 1.5)"
-        elif index == 1:
-            expression = f"({base_code} + close / open)"
-        elif index == 2:
-            expression = f"({base_code} * volume / 1000000)"
-        elif index == 3:
-            expression = f"({base_code} - SMA(close, 20))"
-        else:
-            expression = f"({base_code} / (close + 1))"
-
-        discovered_factors.append(
-            {
-                "name": f"Mined_Factor_{index + 1}",
-                "expression": expression,
-                "ic": 0.03 + (index * 0.01),
-                "ir": 0.5 + (index * 0.1),
-                "fitness": 0.03 + (index * 0.01),
-            }
-        )
+    discovered_factors = _build_simulated_candidates(5)
 
     result = {
         "factors": discovered_factors,
@@ -620,6 +665,11 @@ async def _run_simulated_mining(task_id: str, request: GeneticMiningRequest, dat
     mining_tasks[task_id]["status"] = "completed"
     mining_tasks[task_id]["progress"] = 100
     mining_tasks[task_id]["result"] = result
+    mining_tasks[task_id]["candidates"] = discovered_factors
+    mining_tasks[task_id]["current_generation"] = n_generations
+    mining_tasks[task_id]["total_generations"] = n_generations
+    mining_tasks[task_id]["best_fitness"] = result["best_fitness"]
+    mining_tasks[task_id]["avg_fitness"] = result["avg_fitness"]
     mining_tasks[task_id]["fitness_history"] = fitness_history
 
 
