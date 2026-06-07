@@ -594,6 +594,7 @@ const FactorMining: React.FC = () => {
   const [isMobileView, setIsMobileView] = useState(typeof window !== "undefined" ? window.innerWidth <= 768 : false);
   const [autoSeedState, setAutoSeedState] = useState<AutoMiningSeedState | null>(null);
   const [autoWorkflowMode, setAutoWorkflowMode] = useState<"single" | "campaign">("single");
+  const [autoLaunchMode, setAutoLaunchMode] = useState<"single" | "campaign">("campaign");
   const [persistedRDAgentTaskState, setPersistedRDAgentTaskState] = useState<PersistedRDAgentTaskState | null>(() =>
     loadPersistedRDAgentTaskState()
   );
@@ -730,6 +731,9 @@ const FactorMining: React.FC = () => {
       automation_match_mode: "all",
       automation_wq_ratings: [],
     });
+    if (persistedAutoValues?.preferred_launch_mode === "single" || persistedAutoValues?.preferred_launch_mode === "campaign") {
+      setAutoLaunchMode(persistedAutoValues.preferred_launch_mode);
+    }
 
     rdAgentForm.setFieldsValue({
       objective: "基于 FactorHub 因子库持续生成、回测并筛选新的 SOTA 候选因子",
@@ -1420,6 +1424,21 @@ const FactorMining: React.FC = () => {
     }
   };
 
+  const handleAutoMiningSubmit = async (values: any) => {
+    if (autoLaunchMode === "campaign") {
+      await startAutoMiningCampaign();
+      return;
+    }
+    await startAutoMining(values);
+  };
+
+  const getAutoSubmitButtonLabel = () => {
+    if (mining) {
+      return autoWorkflowMode === "campaign" ? "自动化挖掘中..." : "研究中...";
+    }
+    return autoLaunchMode === "campaign" ? "启动连续探索" : "开始单轮研究";
+  };
+
   const checkAutoCampaignProgress = async (taskId: string) => {
     try {
       const response = (await autoMiningApi.getCampaignStatus(taskId)) as any;
@@ -1918,11 +1937,17 @@ const FactorMining: React.FC = () => {
     persistAutoMiningForm({}, nextValues);
   };
 
+  const updateAutoLaunchMode = (mode: "single" | "campaign") => {
+    setAutoLaunchMode(mode);
+    persistAutoMiningForm({}, { ...autoForm.getFieldsValue(), preferred_launch_mode: mode });
+  };
+
   const persistAutoMiningForm = (_changedValues: any, allValues: any) => {
     if (typeof window === "undefined") return;
     try {
       const payload = {
         ...allValues,
+        preferred_launch_mode: allValues?.preferred_launch_mode || autoLaunchMode,
         dateRange:
           Array.isArray(allValues?.dateRange) && allValues.dateRange.length === 2
             ? [allValues.dateRange[0]?.format?.("YYYY-MM-DD"), allValues.dateRange[1]?.format?.("YYYY-MM-DD")]
@@ -2353,6 +2378,44 @@ const FactorMining: React.FC = () => {
         </div>
       </Option>
     ));
+
+  const renderAutoModeSelector = () => (
+    <Card size="small" className="auto-mode-card" style={{ marginBottom: 16 }}>
+      <Space direction="vertical" size={12} style={{ width: "100%" }}>
+        <div>
+          <div className="auto-mode-title">研究模式</div>
+          <div className="auto-mode-copy">
+            自动挖掘统一使用同一个入口：先配置基础因子和研究目标，再选择是做单轮验证，还是让系统连续探索并合并展示 QuantGPT 与 FactorHub 报告。
+          </div>
+        </div>
+        <Segmented
+          block
+          value={autoLaunchMode}
+          onChange={(value) => updateAutoLaunchMode(value as "single" | "campaign")}
+          options={[
+            {
+              label: (
+                <div className="auto-mode-option">
+                  <div className="auto-mode-option-title">单轮研究</div>
+                  <div className="auto-mode-option-copy">快速生成一轮候选并验证报告</div>
+                </div>
+              ),
+              value: "single",
+            },
+            {
+              label: (
+                <div className="auto-mode-option">
+                  <div className="auto-mode-option-title">连续探索</div>
+                  <div className="auto-mode-option-copy">多轮迭代筛选并保留最终候选</div>
+                </div>
+              ),
+              value: "campaign",
+            },
+          ]}
+        />
+      </Space>
+    </Card>
+  );
 
   const renderRDAgentMiningTab = () => (
     <Row gutter={[24, 24]}>
@@ -3561,7 +3624,8 @@ const FactorMining: React.FC = () => {
               <Row gutter={[24, 24]}>
                 <Col xs={24} lg={8}>
                   <Card title="自动挖掘配置" className="config-card">
-                    <Form form={autoForm} layout="vertical" onFinish={startAutoMining} onValuesChange={persistAutoMiningForm}>
+                    <Form form={autoForm} layout="vertical" onFinish={handleAutoMiningSubmit} onValuesChange={persistAutoMiningForm}>
+                      {renderAutoModeSelector()}
                       {isMobileView ? (
                         <>
                           <Form.Item label="自动挖掘提示词" name="prompt" rules={[{ required: true, message: "请输入自动挖掘目标" }]}>
@@ -3644,6 +3708,92 @@ const FactorMining: React.FC = () => {
                               </Form>
                             </Panel>
                           </Collapse>
+
+                          {autoLaunchMode === "campaign" ? (
+                            <Card size="small" title="连续探索配置" style={{ marginBottom: 16 }}>
+                              <Row gutter={16}>
+                                <Col xs={24} sm={12}>
+                                  <Form.Item label="累计探索次数" name="automation_exploration_rounds" rules={[{ required: true, message: "请输入累计探索次数" }]}>
+                                    <InputNumber min={1} max={10} style={{ width: "100%" }} />
+                                  </Form.Item>
+                                </Col>
+                                <Col xs={24} sm={12}>
+                                  <Form.Item label="每轮候选轮次" name="automation_n_candidates_per_round" rules={[{ required: true, message: "请输入每轮候选轮次" }]}>
+                                    <InputNumber min={1} max={10} style={{ width: "100%" }} />
+                                  </Form.Item>
+                                </Col>
+                              </Row>
+                              <Form.Item label="每轮自动补充新增因子数" name="automation_additional_factor_count_per_round" rules={[{ required: true, message: "请输入每轮新增因子数" }]}>
+                                <InputNumber min={0} max={10} style={{ width: "100%" }} />
+                              </Form.Item>
+                              <Form.Item label="每轮因子更新方式" name="automation_factor_update_mode">
+                                <Select>
+                                  <Option value="append">追加新因子</Option>
+                                  <Option value="reselect">根据上一轮结果重新选择因子</Option>
+                                </Select>
+                              </Form.Item>
+                              <Card
+                                size="small"
+                                title="策略配置"
+                                style={{ marginBottom: 16, background: "#fafafa", borderColor: "#f0f0f0" }}
+                              >
+                                <Form.Item
+                                  label="下一轮父代选择策略"
+                                  name="automation_parent_selection_strategy"
+                                  tooltip="控制当本轮效果变差时，下一轮是沿用最新一轮继续，还是回到历史最高分结果继续。"
+                                  style={{ marginBottom: 0 }}
+                                >
+                                  <Select>
+                                    <Option value="best_score_so_far">如果本轮更差，则沿用历史最高分继续</Option>
+                                    <Option value="latest_round">无论分数如何，始终沿用上一轮继续</Option>
+                                  </Select>
+                                </Form.Item>
+                              </Card>
+                              <Form.Item label="筛选逻辑" name="automation_match_mode">
+                                <Select>
+                                  <Option value="all">同时满足全部条件</Option>
+                                  <Option value="any">满足任意一个条件</Option>
+                                </Select>
+                              </Form.Item>
+                              <Row gutter={16}>
+                                <Col xs={24} sm={12}>
+                                  <Form.Item label="最低 Score" name="automation_score_min">
+                                    <InputNumber min={0} max={100} style={{ width: "100%" }} />
+                                  </Form.Item>
+                                </Col>
+                                <Col xs={24} sm={12}>
+                                  <Form.Item label="最低 L/S Sharpe" name="automation_ls_sharpe_min">
+                                    <InputNumber min={-5} max={10} step={0.1} style={{ width: "100%" }} />
+                                  </Form.Item>
+                                </Col>
+                              </Row>
+                              <Row gutter={16}>
+                                <Col xs={24} sm={12}>
+                                  <Form.Item label="最低 L/S Return" name="automation_ls_return_min">
+                                    <InputNumber min={-1} max={5} step={0.01} style={{ width: "100%" }} />
+                                  </Form.Item>
+                                </Col>
+                                <Col xs={24} sm={12}>
+                                  <Form.Item label="最低 WQ Return" name="automation_wq_return_min">
+                                    <InputNumber min={-1} max={5} step={0.01} style={{ width: "100%" }} />
+                                  </Form.Item>
+                                </Col>
+                              </Row>
+                              <Form.Item label="允许的 WQ Rating" name="automation_wq_ratings" tooltip="按 WQ Rating 筛选：Spectacular / Excellent / Good / Average / Needs Improvement">
+                                <Select
+                                  mode="multiple"
+                                  placeholder="选择 WQ Rating；为空表示不限制"
+                                  options={[
+                                    { label: "Spectacular", value: "Spectacular" },
+                                    { label: "Excellent", value: "Excellent" },
+                                    { label: "Good", value: "Good" },
+                                    { label: "Average", value: "Average" },
+                                    { label: "Needs Improvement", value: "Needs Improvement" },
+                                  ]}
+                                />
+                              </Form.Item>
+                            </Card>
+                          ) : null}
                         </>
                       ) : (
                         <>
@@ -3728,106 +3878,106 @@ const FactorMining: React.FC = () => {
                             </Col>
                           </Row>
 
+                          {autoLaunchMode === "campaign" ? (
+                            <Card size="small" title="连续探索配置" style={{ marginBottom: 16 }}>
+                              <Row gutter={16}>
+                                <Col xs={24} sm={12}>
+                                  <Form.Item label="累计探索次数" name="automation_exploration_rounds" rules={[{ required: true, message: "请输入累计探索次数" }]}>
+                                    <InputNumber min={1} max={10} style={{ width: "100%" }} />
+                                  </Form.Item>
+                                </Col>
+                                <Col xs={24} sm={12}>
+                                  <Form.Item label="每轮候选轮次" name="automation_n_candidates_per_round" rules={[{ required: true, message: "请输入每轮候选轮次" }]}>
+                                    <InputNumber min={1} max={10} style={{ width: "100%" }} />
+                                  </Form.Item>
+                                </Col>
+                              </Row>
+                              <Form.Item label="每轮自动补充新增因子数" name="automation_additional_factor_count_per_round" rules={[{ required: true, message: "请输入每轮新增因子数" }]}>
+                                <InputNumber min={0} max={10} style={{ width: "100%" }} />
+                              </Form.Item>
+                              <Form.Item label="每轮因子更新方式" name="automation_factor_update_mode">
+                                <Select>
+                                  <Option value="append">追加新因子</Option>
+                                  <Option value="reselect">根据上一轮结果重新选择因子</Option>
+                                </Select>
+                              </Form.Item>
+                              <Card
+                                size="small"
+                                title="策略配置"
+                                style={{ marginBottom: 16, background: "#fafafa", borderColor: "#f0f0f0" }}
+                              >
+                                <Form.Item
+                                  label="下一轮父代选择策略"
+                                  name="automation_parent_selection_strategy"
+                                  tooltip="控制当本轮效果变差时，下一轮是沿用最新一轮继续，还是回到历史最高分结果继续。"
+                                  style={{ marginBottom: 0 }}
+                                >
+                                  <Select>
+                                    <Option value="best_score_so_far">如果本轮更差，则沿用历史最高分继续</Option>
+                                    <Option value="latest_round">无论分数如何，始终沿用上一轮继续</Option>
+                                  </Select>
+                                </Form.Item>
+                              </Card>
+                              <Form.Item label="筛选逻辑" name="automation_match_mode">
+                                <Select>
+                                  <Option value="all">同时满足全部条件</Option>
+                                  <Option value="any">满足任意一个条件</Option>
+                                </Select>
+                              </Form.Item>
+                              <Row gutter={16}>
+                                <Col xs={24} sm={12}>
+                                  <Form.Item label="最低 Score" name="automation_score_min">
+                                    <InputNumber min={0} max={100} style={{ width: "100%" }} />
+                                  </Form.Item>
+                                </Col>
+                                <Col xs={24} sm={12}>
+                                  <Form.Item label="最低 L/S Sharpe" name="automation_ls_sharpe_min">
+                                    <InputNumber min={-5} max={10} step={0.1} style={{ width: "100%" }} />
+                                  </Form.Item>
+                                </Col>
+                              </Row>
+                              <Row gutter={16}>
+                                <Col xs={24} sm={12}>
+                                  <Form.Item label="最低 L/S Return" name="automation_ls_return_min">
+                                    <InputNumber min={-1} max={5} step={0.01} style={{ width: "100%" }} />
+                                  </Form.Item>
+                                </Col>
+                                <Col xs={24} sm={12}>
+                                  <Form.Item label="最低 WQ Return" name="automation_wq_return_min">
+                                    <InputNumber min={-1} max={5} step={0.01} style={{ width: "100%" }} />
+                                  </Form.Item>
+                                </Col>
+                              </Row>
+                              <Form.Item label="允许的 WQ Rating" name="automation_wq_ratings" tooltip="按 WQ Rating 筛选：Spectacular / Excellent / Good / Average / Needs Improvement">
+                                <Select
+                                  mode="multiple"
+                                  placeholder="选择 WQ Rating；为空表示不限制"
+                                  options={[
+                                    { label: "Spectacular", value: "Spectacular" },
+                                    { label: "Excellent", value: "Excellent" },
+                                    { label: "Good", value: "Good" },
+                                    { label: "Average", value: "Average" },
+                                    { label: "Needs Improvement", value: "Needs Improvement" },
+                                  ]}
+                                />
+                              </Form.Item>
+                            </Card>
+                          ) : null}
+
                         </>
                       )}
-
-                      <Form.Item><Button type="primary" htmlType="submit" icon={<PlayCircleOutlined />} loading={loading && activeTab === "auto"} block size="large" disabled={mining}>{mining && activeTab === "auto" ? "研究中..." : "开始自动挖掘"}</Button></Form.Item>
-
-                      <Card size="small" title="自动化轮次配置" style={{ marginBottom: 16 }}>
-                        <Row gutter={16}>
-                          <Col xs={24} sm={12}>
-                            <Form.Item label="累计探索次数" name="automation_exploration_rounds" rules={[{ required: true, message: "请输入累计探索次数" }]}>
-                              <InputNumber min={1} max={10} style={{ width: "100%" }} />
-                            </Form.Item>
-                          </Col>
-                          <Col xs={24} sm={12}>
-                            <Form.Item label="每轮候选轮次" name="automation_n_candidates_per_round" rules={[{ required: true, message: "请输入每轮候选轮次" }]}>
-                              <InputNumber min={1} max={10} style={{ width: "100%" }} />
-                            </Form.Item>
-                          </Col>
-                        </Row>
-                        <Form.Item label="每轮自动补充新增因子数" name="automation_additional_factor_count_per_round" rules={[{ required: true, message: "请输入每轮新增因子数" }]}>
-                          <InputNumber min={0} max={10} style={{ width: "100%" }} />
-                        </Form.Item>
-                        <Form.Item label="每轮因子更新方式" name="automation_factor_update_mode">
-                          <Select>
-                            <Option value="append">追加新因子</Option>
-                            <Option value="reselect">根据上一轮结果重新选择因子</Option>
-                          </Select>
-                        </Form.Item>
-                        <Card
-                          size="small"
-                          title="策略配置"
-                          style={{ marginBottom: 16, background: "#fafafa", borderColor: "#f0f0f0" }}
-                        >
-                          <Form.Item
-                            label="下一轮父代选择策略"
-                            name="automation_parent_selection_strategy"
-                            tooltip="控制当本轮效果变差时，下一轮是沿用最新一轮继续，还是回到历史最高分结果继续。"
-                            style={{ marginBottom: 0 }}
-                          >
-                            <Select>
-                              <Option value="best_score_so_far">如果本轮更差，则沿用历史最高分继续</Option>
-                              <Option value="latest_round">无论分数如何，始终沿用上一轮继续</Option>
-                            </Select>
-                          </Form.Item>
-                        </Card>
-                        <Form.Item label="筛选逻辑" name="automation_match_mode">
-                          <Select>
-                            <Option value="all">同时满足全部条件</Option>
-                            <Option value="any">满足任意一个条件</Option>
-                          </Select>
-                        </Form.Item>
-                        <Row gutter={16}>
-                          <Col xs={24} sm={12}>
-                            <Form.Item label="最低 Score" name="automation_score_min">
-                              <InputNumber min={0} max={100} style={{ width: "100%" }} />
-                            </Form.Item>
-                          </Col>
-                          <Col xs={24} sm={12}>
-                            <Form.Item label="最低 L/S Sharpe" name="automation_ls_sharpe_min">
-                              <InputNumber min={-5} max={10} step={0.1} style={{ width: "100%" }} />
-                            </Form.Item>
-                          </Col>
-                        </Row>
-                        <Row gutter={16}>
-                          <Col xs={24} sm={12}>
-                            <Form.Item label="最低 L/S Return" name="automation_ls_return_min">
-                              <InputNumber min={-1} max={5} step={0.01} style={{ width: "100%" }} />
-                            </Form.Item>
-                          </Col>
-                          <Col xs={24} sm={12}>
-                            <Form.Item label="最低 WQ Return" name="automation_wq_return_min">
-                              <InputNumber min={-1} max={5} step={0.01} style={{ width: "100%" }} />
-                            </Form.Item>
-                          </Col>
-                        </Row>
-                        <Form.Item label="允许的 WQ Rating" name="automation_wq_ratings" tooltip="按 WQ Rating 筛选：Spectacular / Excellent / Good / Average / Needs Improvement">
-                          <Select
-                            mode="multiple"
-                            placeholder="选择 WQ Rating；为空表示不限制"
-                            options={[
-                              { label: "Spectacular", value: "Spectacular" },
-                              { label: "Excellent", value: "Excellent" },
-                              { label: "Good", value: "Good" },
-                              { label: "Average", value: "Average" },
-                              { label: "Needs Improvement", value: "Needs Improvement" },
-                            ]}
-                          />
-                        </Form.Item>
-                      </Card>
 
                       <Form.Item>
                         <Button
                           type="primary"
-                          icon={<PlayCircleOutlined />}
-                          onClick={() => void startAutoMiningCampaign()}
-                          loading={loading && autoWorkflowMode === "campaign"}
+                          htmlType="submit"
+                          icon={autoLaunchMode === "campaign" ? <RocketOutlined /> : <PlayCircleOutlined />}
+                          loading={loading && activeTab === "auto"}
                           block
                           size="large"
                           disabled={mining}
                         >
-                          {mining && autoWorkflowMode === "campaign" ? "自动化挖掘中..." : "启动全自动化挖掘"}
+                          {getAutoSubmitButtonLabel()}
                         </Button>
                       </Form.Item>
                     </Form>
