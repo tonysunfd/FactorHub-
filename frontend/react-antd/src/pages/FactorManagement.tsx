@@ -8,13 +8,9 @@ import {
   Space,
   Modal,
   Form,
-  InputNumber,
   message,
   Tag,
   Card,
-  Checkbox,
-  Row,
-  Col,
   Tabs,
   Tooltip
 } from 'antd'
@@ -25,7 +21,6 @@ import {
   SearchOutlined,
   DeleteOutlined,
   EyeOutlined,
-  CheckOutlined,
   CopyOutlined,
   QuestionCircleOutlined,
   WarningOutlined,
@@ -290,7 +285,7 @@ const FactorManagement: React.FC = () => {
   }
 
   // 复制因子
-  const handleCopyFactor = async (id: number, name: string) => {
+  const handleCopyFactor = async (id: number) => {
     try {
       const response = await api.copyFactor(id) as any
       if (response.success) {
@@ -363,7 +358,7 @@ const FactorManagement: React.FC = () => {
             type="link"
             size="small"
             icon={<CopyOutlined />}
-            onClick={() => handleCopyFactor(record.id, record.name)}
+            onClick={() => handleCopyFactor(record.id)}
           >
             复制
           </Button>

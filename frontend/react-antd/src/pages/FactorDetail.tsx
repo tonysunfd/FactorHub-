@@ -242,8 +242,6 @@ const FactorDetail: React.FC = () => {
   const icTimeSeriesChartRef = useRef<HTMLDivElement>(null)
   const eventResponseChartRef = useRef<HTMLDivElement>(null)
   const decayCurveChartRef = useRef<HTMLDivElement>(null)
-  const alphaBetaChartRef = useRef<HTMLDivElement>(null)
-  const returnDecompositionChartRef = useRef<HTMLDivElement>(null)
   const rollingBandChartRef = useRef<HTMLDivElement>(null)
   const transitionMatrixRef = useRef<HTMLDivElement>(null)
   const structuralBreakChartRef = useRef<HTMLDivElement>(null)
@@ -896,7 +894,6 @@ const FactorDetail: React.FC = () => {
     console.log('drawScatterChart: scatterData', scatterData)
     const x = scatterData.x || []
     const y = scatterData.y || []
-    const correlation = scatterData.correlation || 0
     console.log('drawScatterChart: x, y lengths', { xLength: x.length, yLength: y.length })
 
     const option: echarts.EChartsOption = {
@@ -1527,8 +1524,6 @@ const FactorDetail: React.FC = () => {
     const displayPowers = powers.slice(0, halfLen)
 
     // 转换频率为周期（天数）
-    const periods = displayFreqs.map((f: number) => (f > 0 ? 1 / f : 0))
-
     const option: echarts.EChartsOption = {
       title: {
         text: '功率谱（频域分析）',
@@ -1955,10 +1950,10 @@ const FactorDetail: React.FC = () => {
       const basePrice = displayStock[0]?.close || 1
       const baseFactor = displayFactorValues[0] || 1
 
-      const normalizedPrices = displayStock.map((d, i) =>
+      const normalizedPrices = displayStock.map((d) =>
         ((d.close - basePrice) / basePrice * 100).toFixed(2)
       )
-      const normalizedFactors = displayFactorValues.map((v: any, i: number) =>
+      const normalizedFactors = displayFactorValues.map((v: any) =>
         ((v - baseFactor) / Math.abs(baseFactor) * 100).toFixed(2)
       )
 
@@ -2211,23 +2206,6 @@ const FactorDetail: React.FC = () => {
     myChart.setOption(option, true)
   }, [chartData, factorChartType])
 
-  // 获取IC统计数据
-  const getICStats = () => {
-    if (!analysisData?.ic?.data?.ic_stats) {
-      return null
-    }
-
-    const stats = analysisData.ic.data.ic_stats
-    const factorNames = Object.keys(stats)
-
-    if (factorNames.length === 0) {
-      return null
-    }
-
-    const factorName = factorNames[0]
-    return stats[factorName] || null
-  }
-
   // 初始加载
   useEffect(() => {
     loadFactorDetail()
@@ -2356,8 +2334,6 @@ const FactorDetail: React.FC = () => {
       })
     }
   }, [])
-
-  const icStats = getICStats()
 
   return (
     <div className="factor-detail-container">

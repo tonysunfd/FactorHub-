@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef } from 'react'
-import { useNavigate } from 'react-router-dom'
 import {
   Card,
   Form,
@@ -24,8 +23,7 @@ import {
   RocketOutlined,
   BarChartOutlined,
   LineChartOutlined,
-  ThunderboltOutlined,
-  SyncOutlined
+  ThunderboltOutlined
 } from '@ant-design/icons'
 import { AimOutlined, BulbOutlined } from '@ant-design/icons'
 import * as echarts from 'echarts'
@@ -46,6 +44,7 @@ interface Factor {
 }
 
 interface OptimizationResult {
+  stock_code?: string
   weights: Record<string, number>
   method: string
   factors: string[]
@@ -72,7 +71,6 @@ interface OptimizationResult {
 }
 
 const PortfolioAnalysis: React.FC = () => {
-  const navigate = useNavigate()
   const [optimizeForm] = Form.useForm()
   const [compareForm] = Form.useForm()
   const weightChartRef = useRef<HTMLDivElement>(null)
@@ -100,6 +98,15 @@ const PortfolioAnalysis: React.FC = () => {
 
   // 方法对比状态
   const [compareResult, setCompareResult] = useState<any>(null)
+
+  const methodDisplayMap: Record<string, string> = {
+    equal_weight: '等权重',
+    ic_weight: 'IC加权',
+    ir_weight: 'IR加权',
+    max_sharpe: '最大夏普',
+    max_return: '最大收益',
+    min_variance: '最小方差'
+  }
 
   // 加载因子列表
   const loadFactors = async () => {
@@ -444,14 +451,6 @@ const PortfolioAnalysis: React.FC = () => {
 
     const weights = data.weights
     const factorNames = Object.keys(weights)
-    const methodDisplay = {
-      equal_weight: '等权重',
-      ic_weight: 'IC加权',
-      ir_weight: 'IR加权',
-      max_sharpe: '最大夏普',
-      max_return: '最大收益',
-      min_variance: '最小方差'
-    }
     const method = data.method || 'equal_weight'
 
     // 从因子列表中获取因子代码
@@ -503,12 +502,12 @@ const PortfolioAnalysis: React.FC = () => {
       return `df['${factorName}']`
     }
 
-    let code = `# 组合因子 - ${methodDisplay[method] || method}优化
+    let code = `# 组合因子 - ${methodDisplayMap[method] || method}优化
 # 生成时间: ${new Date().toLocaleString()}
 
 def calculate_factor(df):
     """
-    组合因子 - 基于${factorNames.length}个因子的${methodDisplay[method] || method}组合
+    组合因子 - 基于${factorNames.length}个因子的${methodDisplayMap[method] || method}组合
     权重分配:
 ${factorNames.map(name => `    ${name}: ${(weights[name] * 100).toFixed(2)}%`).join('\n')}
     """
@@ -537,8 +536,8 @@ ${factorNames.map(name => `    ${name}: ${(weights[name] * 100).toFixed(2)}%`).j
     # 加权组合
     composite = `
     const parts: string[] = []
-    factorNames.forEach((name, index) => {
-      const weight = weights[name]
+    factorNames.forEach((_, index) => {
+      const weight = weights[factorNames[index]]
       parts.push(`${weight.toFixed(4)} * factor_${index + 1}`)
     })
     code += parts.join(' +\n        ')
@@ -557,15 +556,6 @@ ${factorNames.map(name => `    ${name}: ${(weights[name] * 100).toFixed(2)}%`).j
     if (!optimizationResult) {
       message.warning('请先完成权重优化')
       return
-    }
-
-    const methodDisplay = {
-      equal_weight: '等权重',
-      ic_weight: 'IC加权',
-      ir_weight: 'IR加权',
-      max_sharpe: '最大夏普',
-      max_return: '最大收益',
-      min_variance: '最小方差'
     }
 
     const method = optimizationResult.method || 'equal_weight'
@@ -588,7 +578,7 @@ ${factorNames.map(name => `    ${name}: ${(weights[name] * 100).toFixed(2)}%`).j
     const factorData = {
       name: `组合因子_${method}_${timestamp}_${stockCode}`,
       category: '组合因子',
-      description: `基于${factorNames.length}个因子的${methodDisplay[method]}优化组合`,
+      description: `基于${factorNames.length}个因子的${methodDisplayMap[method] || method}优化组合`,
       code: compositeFactorCode,
       formula_type: 'function'
     }
@@ -1216,7 +1206,7 @@ ${factorNames.map(name => `    ${name}: ${(weights[name] * 100).toFixed(2)}%`).j
                       </Form.Item>
 
                       {/* 参数配置 */}
-                      <Divider style={{ content: { margin: 0 } }} titlePlacement="left">
+                        <Divider styles={{ content: { margin: 0 } }} titlePlacement="left">
                         参数配置
                       </Divider>
 
@@ -1722,7 +1712,7 @@ ${factorNames.map(name => `    ${name}: ${(weights[name] * 100).toFixed(2)}%`).j
                         <RangePicker style={{ width: '100%' }} />
                       </Form.Item>
 
-                      <Divider style={{ content: { margin: 0 } }} titlePlacement="left">
+                        <Divider styles={{ content: { margin: 0 } }} titlePlacement="left">
                         对比方法
                       </Divider>
                       <p className="text-hint">选择要对比的优化方法（至少2个）</p>
@@ -1760,14 +1750,6 @@ ${factorNames.map(name => `    ${name}: ${(weights[name] * 100).toFixed(2)}%`).j
                         {() => {
                           const selectedMethods =
                             compareForm.getFieldValue('compare_methods') || []
-                          const methodNames = {
-                            equal_weight: '等权重',
-                            ic_weight: 'IC加权',
-                            ir_weight: 'IR加权',
-                            max_sharpe: '最大夏普',
-                            max_return: '最大收益',
-                            min_variance: '最小方差'
-                          }
                           return (
                             <div
                               style={{

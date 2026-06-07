@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef } from "react";
-import { useNavigate } from "react-router-dom";
 import {
   Card,
   Form,
@@ -24,12 +23,6 @@ import {
   BarChartOutlined,
   RocketOutlined,
   SyncOutlined,
-  LoadingOutlined,
-  InfoCircleOutlined,
-  CheckCircleOutlined,
-  WarningOutlined,
-  AimOutlined,
-  BulbOutlined,
   ClockCircleOutlined,
 } from "@ant-design/icons";
 import * as echarts from "echarts";
@@ -83,7 +76,6 @@ interface MiningResult {
 }
 
 const FactorMining: React.FC = () => {
-  const navigate = useNavigate();
   const [form] = Form.useForm();
   const evolutionChartRef = useRef<HTMLDivElement>(null);
   const resultChartRef = useRef<HTMLDivElement>(null);
@@ -99,8 +91,8 @@ const FactorMining: React.FC = () => {
   const [miningResult, setMiningResult] = useState<MiningResult | null>(null);
   const [elapsedTime, setElapsedTime] = useState<number>(0); // 挖掘已用时间（秒）
   const miningStartTimeRef = useRef<number | null>(null); // 挖掘开始时间戳
-  const elapsedTimeIntervalRef = useRef<NodeJS.Timeout | null>(null); // 计时器ID
-  const [savedFactorNames, setSavedFactorNames] = useState<Set<string>>(
+  const elapsedTimeIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null); // 计时器ID
+  const [, setSavedFactorNames] = useState<Set<string>>(
     new Set(),
   ); // 已保存的因子名称
 
@@ -655,84 +647,6 @@ const FactorMining: React.FC = () => {
     }
   };
 
-  // 保存单个因子到后端（带重试机制）
-  const saveSingleFactorWithRetry = async (
-    factor: MinedFactor,
-    index: number,
-    dateStr: string,
-    stockCode: string,
-  ): Promise<{ success: boolean; name?: string; renamed?: boolean }> => {
-    const baseFactorName = `Mined_Factor_${index + 1}_${dateStr}_${stockCode}`;
-
-    for (let retry = 0; retry <= 5; retry++) {
-      const factorName =
-        retry === 0 ? baseFactorName : `${baseFactorName}_${retry}`;
-
-      try {
-        // 生成完整的因子函数代码
-        const processedExpr = factor.expression
-          .replace(/\bopen\b/g, "df['open']")
-          .replace(/\bclose\b/g, "df['close']")
-          .replace(/\bhigh\b/g, "df['high']")
-          .replace(/\blow\b/g, "df['low']")
-          .replace(/\bvolume\b/g, "df['volume']");
-
-        const factorCode = `def calculate_factor(df):
-    """
-    遗传算法挖掘因子
-    表达式: ${factor.expression}
-    IC: ${factor.ic?.toFixed(4)}
-    IR: ${factor.ir?.toFixed(4)}
-    """
-    import pandas as pd
-    import numpy as np
-
-    try:
-        result = ${processedExpr}
-        return result
-    except Exception as e:
-        return pd.Series(0, index=df.index)
-`;
-
-        const factorData = {
-          name: factorName,
-          code: factorCode,
-          category: "遗传挖掘",
-          description: `通过遗传算法挖掘的因子 | 表达式: ${factor.expression} | IC: ${factor.ic?.toFixed(4)} | IR: ${factor.ir?.toFixed(4)} | 适应度: ${factor.fitness?.toFixed(4)}`,
-          formula_type: "function",
-        };
-
-        const response = (await api.createFactor(factorData)) as any;
-
-        if (response.success) {
-          return {
-            success: true,
-            name: factorName,
-            renamed: retry > 0,
-          };
-        }
-      } catch (error: any) {
-        const errorMsg =
-          error.response?.data?.detail ||
-          error.response?.data?.message ||
-          error.message ||
-          "未知错误";
-
-        // 如果是"已存在"错误且还可以重试，继续循环
-        if (errorMsg.includes("已存在") && retry < 5) {
-          console.log(
-            `因子 ${factorName} 已存在，下一次尝试使用: ${baseFactorName}_${retry + 1}`,
-          );
-          continue;
-        } else {
-          return { success: false };
-        }
-      }
-    }
-
-    return { success: false };
-  };
-
   // 保存全部因子
   const saveAllFactors = async () => {
     if (
@@ -942,7 +856,7 @@ const FactorMining: React.FC = () => {
                     optionLabelProp="label"
                     maxTagCount="responsive"
                     size="large"
-                    classNames={{ popup: "factor-select-dropdown" }}
+                    popupClassName="factor-select-dropdown"
                     listHeight={400}
                   >
                     {factors.map((factor) => (

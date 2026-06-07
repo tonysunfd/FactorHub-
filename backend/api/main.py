@@ -1,17 +1,20 @@
 """
 FastAPI主应用
 """
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.encoders import jsonable_encoder
-from contextlib import asynccontextmanager
-import sys
-from pathlib import Path
-import numpy as np
+import asyncio
+import importlib
 import json
 import os
+import sys
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+import numpy as np
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 # 添加项目根目录到Python路径
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -19,18 +22,29 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.core.settings import settings
 from backend.core.database import init_db
-from backend.services.factor_service import factor_service
-from backend.services.data_service import data_service
 
-# 导入路由
-from .routers import (
-    factors,
-    analysis,
-    mining,
-    portfolio,
-    backtest,
-    data
-)
+
+def _include_routers(app: FastAPI) -> None:
+    """延迟导入路由，减少应用导入阶段的顶层耦合。"""
+    factors = importlib.import_module("backend.api.routers.factors")
+    analysis = importlib.import_module("backend.api.routers.analysis")
+    mining = importlib.import_module("backend.api.routers.mining")
+    portfolio = importlib.import_module("backend.api.routers.portfolio")
+    backtest = importlib.import_module("backend.api.routers.backtest")
+    data = importlib.import_module("backend.api.routers.data")
+
+    app.include_router(factors.router, prefix="/api/factors", tags=["因子管理"])
+    app.include_router(analysis.router, prefix="/api/analysis", tags=["因子分析"])
+    app.include_router(mining.router, prefix="/api/mining", tags=["因子挖掘"])
+    app.include_router(portfolio.router, prefix="/api/portfolio", tags=["组合分析"])
+    app.include_router(backtest.router, prefix="/api/backtest", tags=["策略回测"])
+    app.include_router(data.router, prefix="/api/data", tags=["数据管理"])
+
+
+def _load_preset_factors_sync() -> None:
+    """延迟加载预置因子，避免阻塞 HTTP 服务监听。"""
+    factor_service = importlib.import_module("backend.services.factor_service").factor_service
+    factor_service.load_preset_factors()
 
 
 @asynccontextmanager
@@ -39,8 +53,19 @@ async def lifespan(app: FastAPI):
     # 启动时初始化
     print("启动FastAPI服务...")
     init_db()
-    factor_service.load_preset_factors()
-    print("数据库和预置因子加载完成")
+    app.state.preset_factors_ready = False
+    app.state.preset_factors_error = None
+
+    async def preload() -> None:
+        try:
+            await asyncio.to_thread(_load_preset_factors_sync)
+            app.state.preset_factors_ready = True
+            print("数据库和预置因子加载完成")
+        except Exception as exc:  # pragma: no cover - 启动诊断
+            app.state.preset_factors_error = str(exc)
+            print(f"预置因子异步加载失败: {exc}")
+
+    asyncio.create_task(preload())
 
     yield
 
@@ -83,6 +108,8 @@ app = FastAPI(
     default_response_class=JSONResponse
 )
 
+_include_routers(app)
+
 # 配置CORS
 app.add_middleware(
     CORSMiddleware,
@@ -123,15 +150,6 @@ async def spa_fallback(request, exc):
     )
 
 
-# 注册路由
-app.include_router(factors.router, prefix="/api/factors", tags=["因子管理"])
-app.include_router(analysis.router, prefix="/api/analysis", tags=["因子分析"])
-app.include_router(mining.router, prefix="/api/mining", tags=["因子挖掘"])
-app.include_router(portfolio.router, prefix="/api/portfolio", tags=["组合分析"])
-app.include_router(backtest.router, prefix="/api/backtest", tags=["策略回测"])
-app.include_router(data.router, prefix="/api/data", tags=["数据管理"])
-
-
 @app.get("/api")
 async def api_root():
     """API 根路径"""
@@ -146,7 +164,15 @@ async def api_root():
 @app.get("/health")
 async def health_check():
     """健康检查"""
-    return {"status": "healthy"}
+    preset_ready = getattr(app.state, "preset_factors_ready", False)
+    preset_error = getattr(app.state, "preset_factors_error", None)
+    return {
+        "status": "healthy",
+        "preset_factors_ready": preset_ready,
+        "preset_factors_error": preset_error,
+        "backend_port": os.getenv("FACTORHUB_BACKEND_PORT", "8001"),
+        "reload_enabled": os.getenv("FACTORHUB_RELOAD", "1") != "0",
+    }
 
 
 # 全局异常处理
@@ -175,6 +201,6 @@ if __name__ == "__main__":
     uvicorn.run(
         "backend.api.main:app",
         host="0.0.0.0",
-        port=8000,
+        port=8001,
         reload=True
     )

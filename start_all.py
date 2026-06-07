@@ -9,6 +9,8 @@ import os
 import signal
 from pathlib import Path
 
+BACKEND_PORT = int(os.getenv("FACTORHUB_BACKEND_PORT", "8001"))
+
 def get_pnpm_cmd():
     if os.name == "nt":
         return "pnpm.cmd"
@@ -150,8 +152,8 @@ def main():
         print("✓ 所有服务启动完成!")
         print("=" * 60)
         print(f"🌐 前端地址: http://localhost:5173")
-        print(f"🔌 API 地址: http://localhost:8000")
-        print(f"📚 API 文档: http://localhost:8000/docs")
+        print(f"🔌 API 地址: http://localhost:{BACKEND_PORT}")
+        print(f"📚 API 文档: http://localhost:{BACKEND_PORT}/docs")
         print("=" * 60)
         print("\n正在打开浏览器...")
 

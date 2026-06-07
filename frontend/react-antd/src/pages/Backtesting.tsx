@@ -1,5 +1,4 @@
 import React, { useState, useRef, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
 import BacktestCharts from '../components/BacktestCharts'
 import {
   Card,
@@ -33,7 +32,6 @@ import {
   FolderOpenOutlined
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
-import type { Dayjs } from 'dayjs'
 import * as echarts from 'echarts'
 import axios from 'axios'
 import './Backtesting.css'
@@ -60,6 +58,12 @@ interface BacktestConfig {
   n_quantiles: number
   weight_method?: string
   shares_per_trade: number
+}
+
+interface BacktestFormValues extends Omit<BacktestConfig, 'stock_codes' | 'start_date' | 'end_date'> {
+  stock_code?: string
+  stock_codes?: string
+  dateRange: [dayjs.Dayjs, dayjs.Dayjs]
 }
 
 interface StrategyTemplate {
@@ -91,8 +95,6 @@ interface BacktestResult {
 // ========== 组件 ==========
 
 const Backtesting: React.FC = () => {
-  const navigate = useNavigate()
-
   // ========== 状态管理 ==========
   const [form] = Form.useForm()
   const [loading, setLoading] = useState(false)
@@ -158,7 +160,7 @@ const Backtesting: React.FC = () => {
   }
 
   // ========== 单策略回测 ==========
-  const runSingleBacktest = async (values: any) => {
+  const runSingleBacktest = async (values: BacktestFormValues) => {
     const [startDate, endDate] = values.dateRange
 
     // 处理因子选择：单因子或多因子
@@ -172,15 +174,15 @@ const Backtesting: React.FC = () => {
       factorName = factorNames[0]  // 使用第一个因子作为主因子（用于向后兼容）
     } else {
       // 单因子策略
-      factorName = values.factor_name
-      factorNames = [factorName]
+      factorName = values.factor_name || ''
+      factorNames = factorName ? [factorName] : []
     }
 
     const config: BacktestConfig = {
       data_mode: values.data_mode,
       stock_codes: values.data_mode === 'single'
-        ? [values.stock_code]
-        : values.stock_codes.split('\n').filter((s: string) => s.trim()),
+        ? (values.stock_code ? [values.stock_code] : [])
+        : (values.stock_codes || '').split('\n').filter((s: string) => s.trim()),
       start_date: startDate.format('YYYY-MM-DD'),
       end_date: endDate.format('YYYY-MM-DD'),
       factor_name: factorName,
@@ -385,8 +387,8 @@ const Backtesting: React.FC = () => {
       // 将 Dayjs 对象转换为 ISO 字符串以便存储
       const configToSave = { ...values }
       if (configToSave.dateRange && Array.isArray(configToSave.dateRange)) {
-        configToSave.dateRange = configToSave.dateRange.map((d: any) =>
-          d instanceof dayjs ? d.toISOString() : d
+        configToSave.dateRange = configToSave.dateRange.map((d: dayjs.Dayjs | string) =>
+          dayjs.isDayjs(d) ? d.toISOString() : d
         )
       }
 
@@ -422,22 +424,23 @@ const Backtesting: React.FC = () => {
       const config = { ...strategy.config }
 
       // 处理 dateRange 字段（从 localStorage 读取的需要转换）
-      if (config.dateRange) {
-        if (Array.isArray(config.dateRange) && config.dateRange.length === 2) {
+      if ((config as any).dateRange) {
+        const dateRange = (config as any).dateRange
+        if (Array.isArray(dateRange) && dateRange.length === 2) {
           // 检查是否已经是 Dayjs 对象
-          const isDayjs = config.dateRange[0].$isDayjsObject === true ||
-                         (typeof config.dateRange[0].format === 'function')
+          const isDayjs = dateRange[0]?.$isDayjsObject === true ||
+                         (typeof dateRange[0]?.format === 'function')
 
           if (!isDayjs) {
-            console.log('[loadStrategy] 转换日期字段:', config.dateRange)
-            config.dateRange = [dayjs(config.dateRange[0]), dayjs(config.dateRange[1])]
-            console.log('[loadStrategy] 转换后的日期:', config.dateRange)
+            console.log('[loadStrategy] 转换日期字段:', dateRange)
+            ;(config as any).dateRange = [dayjs(dateRange[0]), dayjs(dateRange[1])]
+            console.log('[loadStrategy] 转换后的日期:', (config as any).dateRange)
           }
         }
       } else {
         // 如果没有 dateRange，设置默认值
         console.log('[loadStrategy] 策略没有 dateRange，设置默认值')
-        config.dateRange = [dayjs().subtract(1, 'year'), dayjs()]
+        ;(config as any).dateRange = [dayjs().subtract(1, 'year'), dayjs()]
       }
 
       console.log('[loadStrategy] 设置表单值:', config)
@@ -688,7 +691,7 @@ const Backtesting: React.FC = () => {
                           <Form.Item label="初始资金" name="initial_capital">
                             <InputNumber
                               style={{ width: '100%' }}
-                              formatter={(value) => `${value}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
+                              formatter={(value?: string | number) => `${value ?? ''}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
                               parser={(value) => value!.replace(/\$\s?|(,*)/g, '')}
                               min={0}
                               step={10000}

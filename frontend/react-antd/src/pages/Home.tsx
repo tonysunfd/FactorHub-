@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Row, Col, Card, Badge, Button, Space } from 'antd'
+import { Row, Col, Card, Badge, Button, Space, message } from 'antd'
 import {
   ArrowUpOutlined,
   RocketOutlined,
@@ -16,6 +16,7 @@ import {
   ReloadOutlined
 } from '@ant-design/icons'
 import { api } from '@/services/api'
+import { getBackendStatus, requestBackendControl, type BackendControlResponse, type BackendStatus } from '@/services/backendControl'
 import './Home.css'
 
 interface Stats {
@@ -26,9 +27,15 @@ interface Stats {
   stockCacheCount: number
 }
 
+interface SourceHealthItem {
+  healthy: boolean
+  label?: string
+  message?: string
+}
+
 interface SystemHealth {
   backendConnected: boolean
-  akshareHealthy: boolean
+  sourceHealth: Record<string, SourceHealthItem>
   lastCheck: string
 }
 
@@ -44,9 +51,10 @@ const Home: React.FC = () => {
   })
   const [systemHealth, setSystemHealth] = useState<SystemHealth>({
     backendConnected: false,
-    akshareHealthy: false,
+    sourceHealth: {},
     lastCheck: '检查中...'
   })
+  const [backendStatus, setBackendStatus] = useState<BackendStatus>('checking')
 
   const modules = [
     {
@@ -105,6 +113,7 @@ const Home: React.FC = () => {
 
   useEffect(() => {
     loadStats()
+    checkBackendStatus()
     const interval = setInterval(() => {
       setLastUpdate(new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }))
     }, 60000)
@@ -112,10 +121,37 @@ const Home: React.FC = () => {
     return () => clearInterval(interval)
   }, [])
 
+  const checkBackendStatus = async () => {
+    setBackendStatus(current => (current === 'starting' ? current : 'checking'))
+    const status = await getBackendStatus()
+    setBackendStatus(status)
+  }
+
   const loadStats = async () => {
+    const nowLabel = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
     try {
       const response: any = await api.getFactorStats()
       if (response.success) {
+        const sourceHealth = response.data.source_health || {
+          ...(typeof response.data.akshare_healthy === 'boolean'
+            ? {
+                akshare: {
+                  healthy: response.data.akshare_healthy,
+                  label: 'AKShare',
+                  message: 'legacy stats field'
+                }
+              }
+            : {}),
+          ...(typeof response.data.baostock_healthy === 'boolean'
+            ? {
+                baostock: {
+                  healthy: response.data.baostock_healthy,
+                  label: 'BaoStock',
+                  message: 'legacy stats field'
+                }
+              }
+            : {})
+        }
         setStats({
           totalCount: response.data.total_count || 0,
           presetCount: response.data.preset_count || 0,
@@ -125,23 +161,76 @@ const Home: React.FC = () => {
         })
         setSystemHealth({
           backendConnected: true,
-          akshareHealthy: response.data.akshare_healthy || false,
-          lastCheck: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+          sourceHealth,
+          lastCheck: nowLabel
         })
       }
     } catch (error) {
       console.error('Failed to load stats:', error)
       setSystemHealth({
         backendConnected: false,
-        akshareHealthy: false,
-        lastCheck: '连接失败'
+        sourceHealth: {},
+        lastCheck: `${nowLabel}，连接失败`
       })
+    }
+  }
+
+  const handleStartBackend = async () => {
+    setBackendStatus('starting')
+    try {
+      const data = await requestBackendControl<BackendControlResponse>('start')
+      if (data.running) {
+        setBackendStatus('online')
+        message.success(data.alreadyRunning ? '后端已经在运行' : '后端已启动')
+        loadStats()
+        return
+      }
+
+      message.info(data.message || '后端正在启动，请稍后刷新状态')
+      window.setTimeout(() => {
+        checkBackendStatus()
+        loadStats()
+      }, 2500)
+    } catch (error) {
+      setBackendStatus('offline')
+      message.error(error instanceof Error ? error.message : '启动后端失败')
+    }
+  }
+
+  const handleRestartBackend = async () => {
+    setBackendStatus('starting')
+    try {
+      const data = await requestBackendControl<BackendControlResponse>('restart')
+      if (data.running) {
+        setBackendStatus('online')
+        message.success(data.message || '后端已重启并加载最新代码')
+        loadStats()
+        return
+      }
+
+      message.info(data.message || '后端正在重启，请稍后刷新状态')
+      window.setTimeout(() => {
+        checkBackendStatus()
+        loadStats()
+      }, 2500)
+    } catch (error) {
+      setBackendStatus('offline')
+      message.error(error instanceof Error ? error.message : '重启后端失败')
     }
   }
 
   const handleModuleClick = (url: string) => {
     navigate(url)
   }
+
+  const sourceHealthEntries = Object.entries(systemHealth.sourceHealth)
+  const backendActionText = backendStatus === 'online'
+    ? '重启后端'
+    : backendStatus === 'offline'
+      ? '启动后端'
+      : backendStatus === 'starting'
+        ? '启动中'
+        : '检查后端'
 
   return (
     <div className="home-container">
@@ -247,26 +336,45 @@ const Home: React.FC = () => {
                           {systemHealth.backendConnected ? '已连接' : '未连接'}
                         </span>
                       </div>
-                      <div className="health-item">
-                        {systemHealth.akshareHealthy ? (
-                          <CheckCircleOutlined style={{ color: '#10b981', fontSize: '14px' }} />
-                        ) : (
-                          <CloseCircleOutlined style={{ color: '#ef4444', fontSize: '14px' }} />
-                        )}
-                        <span className="health-label">AKShare</span>
-                        <span className="health-status-text">
-                          {systemHealth.akshareHealthy ? '正常' : '异常'}
-                        </span>
-                      </div>
+                      {sourceHealthEntries.map(([key, item]) => (
+                        <div className="health-item" key={key}>
+                          {item.healthy ? (
+                            <CheckCircleOutlined style={{ color: '#10b981', fontSize: '14px' }} />
+                          ) : (
+                            <CloseCircleOutlined style={{ color: '#ef4444', fontSize: '14px' }} />
+                          )}
+                          <span className="health-label">{item.label || key}</span>
+                          <span className="health-status-text">
+                            {item.healthy ? '正常' : '异常'}
+                          </span>
+                        </div>
+                      ))}
                       <div className="health-item">
                         <ClockCircleOutlined style={{ color: '#64748b', fontSize: '14px' }} />
                         <span className="health-time">{systemHealth.lastCheck}</span>
                       </div>
                       <Button
+                        type="default"
+                        size="small"
+                        icon={backendStatus === 'starting' ? <ReloadOutlined spin /> : <CloudServerOutlined />}
+                        loading={backendStatus === 'starting'}
+                        onClick={backendStatus === 'online' ? handleRestartBackend : backendStatus === 'offline' ? handleStartBackend : checkBackendStatus}
+                        style={{
+                          fontSize: '12px',
+                          padding: '2px 10px',
+                          height: 'auto'
+                        }}
+                      >
+                        {backendActionText}
+                      </Button>
+                      <Button
                         type="text"
                         size="small"
                         icon={<ReloadOutlined />}
-                        onClick={loadStats}
+                        onClick={() => {
+                          checkBackendStatus()
+                          loadStats()
+                        }}
                         style={{
                           color: '#64748b',
                           fontSize: '12px',

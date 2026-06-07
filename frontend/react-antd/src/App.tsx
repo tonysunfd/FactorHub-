@@ -1,14 +1,18 @@
 import { Suspense, useEffect, useState, createElement } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom'
-import { Layout, Menu, Button, Drawer } from 'antd'
+import { Layout, Menu, Button, Drawer, Tooltip, message } from 'antd'
 import {
   DashboardOutlined,
   FileTextOutlined,
   ExperimentOutlined,
   PieChartOutlined,
   SyncOutlined,
-  MenuOutlined
+  MenuOutlined,
+  ApiOutlined,
+  PlayCircleOutlined
 } from '@ant-design/icons'
+import { APP_NAME, APP_VERSION } from './config/app'
+import { getBackendStatus, requestBackendControl, type BackendControlResponse, type BackendStatus } from './services/backendControl'
 import routes from './utils/router'
 import './styles/global.css'
 
@@ -19,6 +23,7 @@ function App() {
   const navigate = useNavigate()
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768)
+  const [backendStatus, setBackendStatus] = useState<BackendStatus>('checking')
 
   useEffect(() => {
     const handleResize = () => {
@@ -27,6 +32,85 @@ function App() {
     window.addEventListener('resize', handleResize)
     return () => window.removeEventListener('resize', handleResize)
   }, [])
+
+  const checkBackendStatus = async () => {
+    setBackendStatus(current => (current === 'starting' ? current : 'checking'))
+    const status = await getBackendStatus()
+    setBackendStatus(status)
+  }
+
+  useEffect(() => {
+    checkBackendStatus()
+  }, [])
+
+  const handleStartBackend = async () => {
+    setBackendStatus('starting')
+    try {
+      const data = await requestBackendControl<BackendControlResponse>('start')
+      if (data.running) {
+        setBackendStatus('online')
+        message.success(data.alreadyRunning ? '后端已经在运行' : '后端已启动')
+        return
+      }
+
+      message.info(data.message || '后端正在启动，请稍后刷新状态')
+      setTimeout(checkBackendStatus, 2500)
+    } catch (error) {
+      setBackendStatus('offline')
+      message.error(error instanceof Error ? error.message : '启动后端失败')
+    }
+  }
+
+  const handleRestartBackend = async () => {
+    setBackendStatus('starting')
+    try {
+      const data = await requestBackendControl<BackendControlResponse>('restart')
+      if (data.running) {
+        setBackendStatus('online')
+        message.success(data.message || '后端已重启并加载最新代码')
+        return
+      }
+
+      message.info(data.message || '后端正在重启，请稍后刷新状态')
+      setTimeout(checkBackendStatus, 2500)
+    } catch (error) {
+      setBackendStatus('offline')
+      message.error(error instanceof Error ? error.message : '重启后端失败')
+    }
+  }
+
+  const backendStatusMeta = {
+    checking: {
+      text: '检查后端',
+      color: '#64748b',
+      background: 'rgba(100, 116, 139, 0.1)',
+      border: 'rgba(100, 116, 139, 0.25)',
+      icon: <SyncOutlined spin />
+    },
+    online: {
+      text: '重启后端',
+      color: '#059669',
+      background: 'rgba(16, 185, 129, 0.12)',
+      border: 'rgba(16, 185, 129, 0.32)',
+      icon: <ApiOutlined />
+    },
+    offline: {
+      text: '启动后端',
+      color: '#b45309',
+      background: 'rgba(245, 158, 11, 0.14)',
+      border: 'rgba(245, 158, 11, 0.36)',
+      icon: <PlayCircleOutlined />
+    },
+    starting: {
+      text: '启动中',
+      color: '#2563eb',
+      background: 'rgba(59, 130, 246, 0.12)',
+      border: 'rgba(59, 130, 246, 0.32)',
+      icon: <SyncOutlined spin />
+    }
+  } satisfies Record<BackendStatus, { text: string; color: string; background: string; border: string; icon: React.ReactNode }>
+
+  const backendMeta = backendStatusMeta[backendStatus]
 
   // 根据路径获取当前选中的菜单
   const getSelectedKey = () => {
@@ -109,15 +193,38 @@ function App() {
           <div>
             <div
               style={{
-                fontFamily: '"SF Mono", "Monaco", "Inconsolata", monospace',
-                fontSize: '18px',
-                fontWeight: 800,
-                letterSpacing: '2px',
-                color: '#1f2937',
-                lineHeight: '1.2'
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px'
               }}
             >
-              FactorHub
+              <div
+                style={{
+                  fontFamily: '"SF Mono", "Monaco", "Inconsolata", monospace',
+                  fontSize: '18px',
+                  fontWeight: 800,
+                  letterSpacing: '2px',
+                  color: '#1f2937',
+                  lineHeight: '1.2'
+                }}
+              >
+                {APP_NAME}
+              </div>
+              <span
+                style={{
+                  fontFamily: '"SF Mono", "Monaco", monospace',
+                  fontSize: '11px',
+                  fontWeight: 700,
+                  color: '#2563eb',
+                  background: 'rgba(37, 99, 235, 0.1)',
+                  border: '1px solid rgba(37, 99, 235, 0.2)',
+                  borderRadius: '999px',
+                  padding: '2px 8px',
+                  lineHeight: 1.4
+                }}
+              >
+                {APP_VERSION}
+              </span>
             </div>
             <div
               style={{
@@ -133,25 +240,49 @@ function App() {
           </div>
         </div>
 
-        {/* 桌面端菜单 */}
-        {!isMobile && (
-          <Menu
-            mode="horizontal"
-            selectedKeys={[getSelectedKey()]}
-            items={menuItems}
-            onClick={handleMenuClick}
-            style={{
-              flex: 1,
-              justifyContent: 'flex-end',
-              background: 'transparent',
-              border: 'none',
-              fontFamily: '"SF Mono", "Monaco", monospace',
-              fontSize: '13px',
-              fontWeight: 700,
-              letterSpacing: '0.5px'
-            }}
-          />
-        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flex: 1, justifyContent: 'flex-end', minWidth: 0 }}>
+          {/* 桌面端菜单 */}
+          {!isMobile && (
+            <Menu
+              mode="horizontal"
+              selectedKeys={[getSelectedKey()]}
+              items={menuItems}
+              onClick={handleMenuClick}
+              style={{
+                flex: 1,
+                justifyContent: 'flex-end',
+                background: 'transparent',
+                border: 'none',
+                fontFamily: '"SF Mono", "Monaco", monospace',
+                fontSize: '13px',
+                fontWeight: 700,
+                letterSpacing: '0.5px',
+                minWidth: 0,
+                overflow: 'hidden'
+              }}
+            />
+          )}
+
+          <Tooltip title={backendStatus === 'online' ? '重启后端并加载当前最新代码' : backendStatus === 'offline' ? '本地开发模式下可启动 FactorHub 后端' : '检查后端状态'}>
+            <Button
+              size="small"
+              icon={backendMeta.icon}
+              loading={backendStatus === 'starting'}
+              onClick={backendStatus === 'online' ? handleRestartBackend : backendStatus === 'offline' ? handleStartBackend : checkBackendStatus}
+              style={{
+                color: backendMeta.color,
+                background: backendMeta.background,
+                borderColor: backendMeta.border,
+                fontFamily: '"SF Mono", "Monaco", monospace',
+                fontSize: '12px',
+                fontWeight: 700,
+                flexShrink: 0
+              }}
+            >
+              {!isMobile ? backendMeta.text : null}
+            </Button>
+          </Tooltip>
+        </div>
 
         {/* 移动端菜单按钮 */}
         {isMobile && (
@@ -213,14 +344,14 @@ function App() {
         <div style={{ maxWidth: '1400px', margin: '0 auto', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div>
             <p style={{ fontFamily: '"SF Mono", "Monaco", monospace', fontSize: '13px', fontWeight: 600, letterSpacing: '1px', color: '#64748b', margin: '0 0 4px 0' }}>
-              © 2025 FactorHub
+              © 2025 {APP_NAME}
             </p>
             <p style={{ fontSize: '11px', letterSpacing: '1px', color: '#4b5563', margin: 0 }}>
               智能量化因子分析平台
             </p>
           </div>
           <div style={{ display: 'flex', gap: '24px' }}>
-            <a href="http://localhost:8000/docs" target="_blank" rel="noopener" style={{ textDecoration: 'none', color: '#64748b', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '8px', transition: 'all 0.3s ease' }}>
+            <a href="http://localhost:8001/docs" target="_blank" rel="noopener" style={{ textDecoration: 'none', color: '#64748b', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '8px', transition: 'all 0.3s ease' }}>
               <span style={{ width: '36px', height: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(59, 130, 246, 0.1)', border: '1px solid rgba(59, 130, 246, 0.3)', borderRadius: '4px', fontFamily: '"SF Mono", monospace', fontSize: '10px', fontWeight: 600 }}>
                 接口
               </span>
@@ -258,4 +389,3 @@ export default function AppWrapper() {
     </BrowserRouter>
   )
 }
-

@@ -1,7 +1,6 @@
 import React, { useRef, useEffect, useState } from 'react'
 import * as echarts from 'echarts'
 import { Tabs, Spin, Empty, Radio, Space } from 'antd'
-import { LineChartOutlined } from '@ant-design/icons'
 
 interface ChartData {
   dates: string[]
@@ -39,6 +38,17 @@ interface SignalTypeData {
 interface SignalData {
   strategy: SignalTypeData  // 策略信号（所有满足条件的信号）
   actual: SignalTypeData    // 实际交易信号（VectorBT执行的交易）
+}
+
+interface LegacySignalData {
+  buy: {
+    dates: string[]
+    prices: number[]
+  }
+  sell: {
+    dates: string[]
+    prices: number[]
+  }
 }
 
 interface EquityData {
@@ -105,9 +115,10 @@ const BacktestCharts: React.FC<BacktestChartsProps> = ({ data, loading = false }
     let normalizedSignals = signals
     if (!signals.strategy && !signals.actual) {
       // 旧格式：signals直接包含buy/sell
+      const legacySignals = signals as unknown as LegacySignalData
       normalizedSignals = {
-        strategy: signals as SignalTypeData,
-        actual: signals as SignalTypeData
+        strategy: legacySignals,
+        actual: legacySignals
       }
     }
 
@@ -458,7 +469,7 @@ const BacktestCharts: React.FC<BacktestChartsProps> = ({ data, loading = false }
         {
           name: '日K线',
           type: 'candlestick',
-          data: kline.dates.map((date, i) => [
+          data: kline.dates.map((_, i) => [
             kline.open[i],
             kline.close[i],
             kline.low[i],
