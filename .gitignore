@@ -67,6 +67,8 @@ skills
 logs/
 vite-app/
 vite-naive-ui/
+config/llm_config.json
+data/reports/auto_mining/
 
 CLAUDE.md
 scripts/

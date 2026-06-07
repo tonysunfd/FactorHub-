@@ -28,6 +28,7 @@ def _include_routers(app: FastAPI) -> None:
     """延迟导入路由，减少应用导入阶段的顶层耦合。"""
     factors = importlib.import_module("backend.api.routers.factors")
     analysis = importlib.import_module("backend.api.routers.analysis")
+    llm = importlib.import_module("backend.api.routers.llm")
     mining = importlib.import_module("backend.api.routers.mining")
     portfolio = importlib.import_module("backend.api.routers.portfolio")
     backtest = importlib.import_module("backend.api.routers.backtest")
@@ -35,6 +36,7 @@ def _include_routers(app: FastAPI) -> None:
 
     app.include_router(factors.router, prefix="/api/factors", tags=["因子管理"])
     app.include_router(analysis.router, prefix="/api/analysis", tags=["因子分析"])
+    app.include_router(llm.router, prefix="/api/llm", tags=["LLM"])
     app.include_router(mining.router, prefix="/api/mining", tags=["因子挖掘"])
     app.include_router(portfolio.router, prefix="/api/portfolio", tags=["组合分析"])
     app.include_router(backtest.router, prefix="/api/backtest", tags=["策略回测"])
