@@ -3,8 +3,6 @@
 """
 from __future__ import annotations
 
-import hashlib
-import html
 import json
 import logging
 import math
@@ -21,6 +19,7 @@ from backend.core.database import get_db_session
 from backend.core.settings import settings
 from backend.repositories.factor_repository import FactorRepository
 from backend.services.factor_generator_service import factor_generator_service
+from backend.services.report_service import generate_report
 from backend.services.factor_service import factor_service
 from backend.services.llm_config_service import llm_config_service
 
@@ -876,9 +875,10 @@ class AutoFactorMiningService:
         grouped = panel.groupby("date")
         daily_rank_ic: list[float] = []
         daily_spread: list[float] = []
+        daily_dates: list[pd.Timestamp] = []
         top_memberships: list[set[str]] = []
 
-        for _, group in grouped:
+        for trade_date, group in grouped:
             clean = group[["stock_code", "factor", "future_return"]].dropna()
             if len(clean) < max(n_groups * 2, 8):
                 continue
@@ -899,6 +899,7 @@ class AutoFactorMiningService:
             grouped_return = ranked.groupby("quantile")["future_return"].mean()
             spread = grouped_return.iloc[-1] - grouped_return.iloc[0]
             daily_spread.append(float(spread))
+            daily_dates.append(pd.Timestamp(trade_date))
 
             top_quantile = ranked["quantile"].max()
             top_memberships.append(set(ranked.loc[ranked["quantile"] == top_quantile, "stock_code"].tolist()))
@@ -906,8 +907,8 @@ class AutoFactorMiningService:
         if not daily_rank_ic or not daily_spread:
             return None
 
-        spread_series = pd.Series(daily_spread, dtype=float)
-        rank_ic_series = pd.Series(daily_rank_ic, dtype=float)
+        spread_series = pd.Series(daily_spread, index=pd.to_datetime(daily_dates), dtype=float).sort_index()
+        rank_ic_series = pd.Series(daily_rank_ic, index=pd.to_datetime(daily_dates), dtype=float).sort_index()
 
         periods_per_year = max(1.0, 252.0 / max(holding_period, 1))
         rank_ic_mean = _safe_float(rank_ic_series.mean())
@@ -954,13 +955,16 @@ class AutoFactorMiningService:
         score = round(min(max(component_scores["total_score"], 0.0), 100.0), 2)
         grade = _grade_from_score(score)
 
-        report_metrics = {
-            "sharpe": round(_safe_float(long_short_sharpe), 4),
-            "cagr": round(_safe_float(long_short_annual), 4),
-            "max_drawdown": round(_safe_float(max_drawdown), 4),
-            "benchmark": benchmark,
-            "direction": direction,
-        }
+        benchmark_returns = self._load_benchmark_returns(
+            benchmark=benchmark,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        report_metrics, report_url = self._write_candidate_report(
+            strategy_returns=spread_series,
+            benchmark_returns=benchmark_returns,
+            periods_per_year=int(periods_per_year),
+        )
         backtest_summary = {
             "long_short_sharpe": round(_safe_float(long_short_sharpe), 4),
             "long_short_annual": round(_safe_float(long_short_annual), 4),
@@ -1005,18 +1009,6 @@ class AutoFactorMiningService:
                 "label": "评估完成",
                 "text": f"使用 {len(rows)} 只股票、{len(spread_series)} 个截面日期完成真实候选评估。",
             },
-        )
-        report_url = self._write_candidate_report(
-            expression=expression,
-            prompt=prompt,
-            report_metrics=report_metrics,
-            backtest_summary=backtest_summary,
-            wq_brain=wq_brain,
-            anti_overfit=anti_overfit,
-            interpretation=interpretation,
-            diagnostics=diagnostics,
-            score=score,
-            grade=grade,
         )
 
         return CandidateEvaluation(
@@ -1213,137 +1205,49 @@ class AutoFactorMiningService:
             "metric_snapshot": metric_snapshot,
         }
 
-    def _render_report_html(
+    def _load_benchmark_returns(
         self,
         *,
-        expression: str,
-        prompt: str,
-        report_metrics: dict[str, Any],
-        backtest_summary: dict[str, Any],
-        wq_brain: dict[str, Any],
-        anti_overfit: dict[str, Any],
-        interpretation: dict[str, Any],
-        diagnostics: list[dict[str, Any]],
-        score: float,
-        grade: str,
-    ) -> str:
-        def _metric_row(name: str, value: Any) -> str:
-            return f"<tr><th>{html.escape(name)}</th><td>{html.escape(str(value))}</td></tr>"
+        benchmark: str,
+        start_date: str,
+        end_date: str,
+    ) -> pd.Series | None:
+        try:
+            benchmark_df = self.data_service.get_benchmark_returns(
+                benchmark=benchmark,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        except Exception as exc:
+            logger.warning("加载 benchmark 数据失败，将生成无基准报告：%s", exc)
+            return None
 
-        diagnostics_html = "".join(
-            f"<li><strong>{html.escape(str(item.get('label') or item.get('type') or '信息'))}</strong>："
-            f"{html.escape(str(item.get('text') or ''))}</li>"
-            for item in diagnostics
-        )
-        tests_html = "".join(
-            f"<li>{html.escape(str(item.get('name')))}：{'通过' if item.get('passed') else '未通过'}，"
-            f"{html.escape(str(item.get('details') or ''))}</li>"
-            for item in anti_overfit.get("tests", [])
-        )
-        weaknesses_html = "".join(f"<li>{html.escape(str(item))}</li>" for item in interpretation.get("weaknesses", []))
-        next_steps_html = "".join(f"<li>{html.escape(str(item))}</li>" for item in interpretation.get("next_steps", []))
+        if benchmark_df is None or benchmark_df.empty or "daily_return" not in benchmark_df.columns:
+            return None
 
-        metric_rows = "".join(
-            [
-                _metric_row("综合评分", f"{score:.2f} / {grade}"),
-                _metric_row("Report Sharpe", report_metrics.get("sharpe")),
-                _metric_row("Report CAGR", report_metrics.get("cagr")),
-                _metric_row("Max Drawdown", report_metrics.get("max_drawdown")),
-                _metric_row("rankIC", backtest_summary.get("rank_ic_mean")),
-                _metric_row("IC IR", backtest_summary.get("ic_ir")),
-                _metric_row("L/S Sharpe", backtest_summary.get("long_short_sharpe")),
-                _metric_row("L/S Return", backtest_summary.get("long_short_annual")),
-                _metric_row("Turnover", backtest_summary.get("turnover")),
-                _metric_row("WQ Fitness", wq_brain.get("wq_fitness")),
-                _metric_row("WQ Rating", wq_brain.get("wq_rating")),
-            ]
-        )
-
-        return f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8" />
-  <title>Auto Mining Report</title>
-  <style>
-    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 32px; color: #0f172a; }}
-    h1, h2 {{ margin-bottom: 12px; }}
-    .meta {{ color: #475569; margin-bottom: 24px; }}
-    .card {{ border: 1px solid #e2e8f0; border-radius: 12px; padding: 20px; margin-bottom: 20px; }}
-    table {{ width: 100%; border-collapse: collapse; }}
-    th, td {{ text-align: left; padding: 10px 12px; border-bottom: 1px solid #e2e8f0; }}
-    th {{ width: 220px; color: #475569; }}
-    ul {{ margin: 0; padding-left: 20px; }}
-    .expr {{ padding: 12px 16px; background: #f8fafc; border-radius: 8px; font-family: ui-monospace, SFMono-Regular, monospace; }}
-  </style>
-</head>
-<body>
-  <h1>自动因子挖掘报告</h1>
-  <div class="meta">研究目标：{html.escape(prompt)}<br/>生成时间：{html.escape(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))}</div>
-
-  <div class="card">
-    <h2>候选表达式</h2>
-    <div class="expr">{html.escape(expression)}</div>
-  </div>
-
-  <div class="card">
-    <h2>核心指标</h2>
-    <table>{metric_rows}</table>
-  </div>
-
-  <div class="card">
-    <h2>诊断结论</h2>
-    <p>{html.escape(str(interpretation.get("summary") or ""))}</p>
-    <h3>主要短板</h3>
-    <ul>{weaknesses_html or "<li>暂无</li>"}</ul>
-    <h3>建议动作</h3>
-    <ul>{next_steps_html or "<li>暂无</li>"}</ul>
-  </div>
-
-  <div class="card">
-    <h2>抗过拟合检查</h2>
-    <p>建议：{html.escape(str(anti_overfit.get("recommendation") or "暂无"))}；得分：{html.escape(str(anti_overfit.get("score") or 0))}</p>
-    <ul>{tests_html or "<li>暂无</li>"}</ul>
-  </div>
-
-  <div class="card">
-    <h2>运行日志</h2>
-    <ul>{diagnostics_html or "<li>暂无</li>"}</ul>
-  </div>
-</body>
-</html>
-"""
+        series = pd.Series(
+            pd.to_numeric(benchmark_df["daily_return"], errors="coerce").values,
+            index=pd.to_datetime(benchmark_df["trade_date"]),
+            dtype=float,
+        ).dropna()
+        return series.sort_index() if not series.empty else None
 
     def _write_candidate_report(
         self,
         *,
-        expression: str,
-        prompt: str,
-        report_metrics: dict[str, Any],
-        backtest_summary: dict[str, Any],
-        wq_brain: dict[str, Any],
-        anti_overfit: dict[str, Any],
-        interpretation: dict[str, Any],
-        diagnostics: list[dict[str, Any]],
-        score: float,
-        grade: str,
-    ) -> str:
-        slug = hashlib.md5(f"{expression}|{prompt}|{datetime.now().isoformat()}".encode("utf-8")).hexdigest()[:12]
-        filename = f"auto_mining_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{slug}.html"
-        path = self.get_report_path(filename)
-        html_text = self._render_report_html(
-            expression=expression,
-            prompt=prompt,
-            report_metrics=report_metrics,
-            backtest_summary=backtest_summary,
-            wq_brain=wq_brain,
-            anti_overfit=anti_overfit,
-            interpretation=interpretation,
-            diagnostics=diagnostics,
-            score=score,
-            grade=grade,
+        strategy_returns: pd.Series,
+        benchmark_returns: pd.Series | None,
+        periods_per_year: int,
+    ) -> tuple[dict[str, Any], str]:
+        report_result = generate_report(
+            strategy_returns,
+            benchmark_returns=benchmark_returns,
+            title="Factor Top-Group Backtest",
+            output_dir=str(AUTO_MINING_REPORT_DIR),
+            periods_per_year=periods_per_year,
         )
-        path.write_text(html_text, encoding="utf-8")
-        return f"/api/mining/reports/{filename}"
+        report_path = Path(report_result["report_path"])
+        return report_result["metrics"], f"/api/mining/reports/{report_path.name}"
 
     def _format_candidate_payload(
         self,

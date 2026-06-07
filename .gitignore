@@ -57,10 +57,8 @@ Thumbs.db
 data/db/factorflow.db
 .pytest_cache
 todo.md
-tests/
 web_demo.md
 memory/
-docs/
 nul
 skills
 
@@ -71,4 +69,3 @@ config/llm_config.json
 data/reports/auto_mining/
 
 CLAUDE.md
-scripts/
