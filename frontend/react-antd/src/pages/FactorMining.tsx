@@ -16,7 +16,6 @@ import {
   Segmented,
   Select,
   Space,
-  Spin,
   Tabs,
   Tag,
   message,
@@ -2591,29 +2590,41 @@ const FactorMining: React.FC = () => {
   );
 
   const renderStatusCard = () => {
+    const renderReadyState = (title: string, description: string) => (
+      <div style={{ padding: 48, textAlign: "center" }}>
+        <RocketOutlined style={{ fontSize: 48, color: "#94a3b8", marginBottom: 16 }} />
+        <h3 style={{ marginBottom: 8 }}>{title}</h3>
+        <p style={{ color: "#64748b", margin: 0 }}>{description}</p>
+      </div>
+    );
+
     if (!mining && !currentStatus && !currentResult) {
       if (isAutoLikeTab && autoWorkflowMode === "campaign" && autoCampaignResult) {
         // fall through to dedicated campaign result rendering below
       } else if (isAutoLikeTab && autoWorkflowMode === "campaign" && autoCampaignStatus) {
         // fall through to dedicated campaign running rendering below
       } else {
-        return (
-          <div style={{ padding: 48, textAlign: "center" }}>
-            <RocketOutlined style={{ fontSize: 48, color: "#94a3b8", marginBottom: 16 }} />
-            <h3 style={{ marginBottom: 8 }}>准备开始{activeTab === "manual" ? "手动挖掘" : activeTab === "rdagent" ? "RDAgent 挖掘" : "自动挖掘"}</h3>
-            <p style={{ color: "#64748b" }}>
-              {activeTab === "manual"
-                ? "选择基础因子后运行 FactorHub 原有挖掘逻辑。"
-                : activeTab === "rdagent"
-                  ? "配置研究目标和筛选条件后，在 FactorHub 内运行 hypothesis、experiment、coding、running、feedback 的 RDAgent 式闭环。"
-                  : "从因子库导入基础因子后，通过 FactorHub 本地自动挖掘链路完成表达式生成、回测评估与候选迭代。"}
-            </p>
-          </div>
+        return renderReadyState(
+          `准备开始${activeTab === "manual" ? "手动挖掘" : activeTab === "rdagent" ? " RDAgent 挖掘" : "自动挖掘"}`,
+          activeTab === "manual"
+            ? "选择基础因子后即可启动遗传算法。"
+            : activeTab === "rdagent"
+              ? "设置目标、候选字段和筛选条件后即可启动。"
+              : "导入基础因子并设置参数后即可启动。"
         );
       }
     }
 
     if (isAutoLikeTab && autoWorkflowMode === "campaign") {
+      if (!mining && (!autoCampaignStatus || autoCampaignStatus.status === "pending")) {
+        return renderReadyState(
+          activeTab === "rdagent" ? "等待启动 RDAgent 挖掘" : "等待启动自动化挖掘",
+          activeTab === "rdagent"
+            ? "左侧完成目标与筛选配置后即可启动。"
+            : "左侧完成自动化参数配置后即可启动。"
+        );
+      }
+
       if (!mining && autoCampaignStatus?.status === "failed") {
         const isRDAgentDataBacktestFailure = activeTab === "rdagent"
           && String(autoCampaignStatus.error || "").includes("FactorHub 内部数据集和回测引擎");
@@ -2638,6 +2649,29 @@ const FactorMining: React.FC = () => {
                 {isRDAgentExpressionFailure ? (
                   <span>请让 RDAgent 输出单行 FactorHub 表达式：只使用行情字段和支持函数，一元函数只传 1 个参数，窗口函数使用整数窗口，两个序列比较用 min(x, y) / max(x, y)。</span>
                 ) : null}
+                <span>任务 ID：{autoCampaignStatus.task_id}</span>
+              </Space>
+            }
+          />
+        );
+      }
+
+      if (!mining && autoCampaignStatus?.status === "cancelled") {
+        return renderReadyState(
+          activeTab === "rdagent" ? "RDAgent 挖掘已停止" : "自动化挖掘已停止",
+          "可以调整左侧配置后重新启动。"
+        );
+      }
+
+      if (!mining && autoCampaignStatus?.status === "completed" && !autoCampaignResult) {
+        return (
+          <Alert
+            type="info"
+            showIcon
+            message={activeTab === "rdagent" ? "RDAgent 结果等待加载" : "自动化结果等待加载"}
+            description={
+              <Space direction="vertical" size={4}>
+                <span>任务已完成，但结果还没有恢复到当前页面。</span>
                 <span>任务 ID：{autoCampaignStatus.task_id}</span>
               </Space>
             }
@@ -3423,7 +3457,10 @@ const FactorMining: React.FC = () => {
       );
     }
 
-    return <Spin size="large" tip="正在加载挖掘结果..." />;
+    return renderReadyState(
+      activeTab === "manual" ? "等待展示结果" : isAutoLikeTab ? "等待展示研究结果" : "等待展示结果",
+      "当前页面还没有可展示的运行结果。"
+    );
   };
 
   return (
@@ -3436,7 +3473,7 @@ const FactorMining: React.FC = () => {
             <RocketOutlined className="header-icon" />
             <div>
               <h1 className="page-title">因子挖掘</h1>
-              <p className="page-subtitle">手动、自动与 RDAgent 挖掘均复用 FactorHub 因子库、报告和回测体系</p>
+              <p className="page-subtitle">统一因子库、统一回测、统一报告</p>
             </div>
           </div>
         </div>
@@ -3696,8 +3733,7 @@ const FactorMining: React.FC = () => {
 
                       <Form.Item><Button type="primary" htmlType="submit" icon={<PlayCircleOutlined />} loading={loading && activeTab === "auto"} block size="large" disabled={mining}>{mining && activeTab === "auto" ? "研究中..." : "开始自动挖掘"}</Button></Form.Item>
 
-                      <Card size="small" title="全自动化挖掘" style={{ marginBottom: 16 }}>
-                        <Tag color="blue" style={{ marginBottom: 16 }}>按轮次重复执行，并保留满足筛选条件的因子</Tag>
+                      <Card size="small" title="自动化轮次配置" style={{ marginBottom: 16 }}>
                         <Row gutter={16}>
                           <Col xs={24} sm={12}>
                             <Form.Item label="累计探索次数" name="automation_exploration_rounds" rules={[{ required: true, message: "请输入累计探索次数" }]}>
