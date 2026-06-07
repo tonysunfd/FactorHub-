@@ -176,10 +176,15 @@ class GeneticFactorMiningService:
             individual.extend(["close"])
             return individual
 
+        if len(var_names) == 1:
+            individual = creator.Individual()
+            individual.extend([self._generate_single_var_expression(var_names[0])])
+            return individual
+
         # 随机选择表达式类型
         expr_type = random.choice(["single", "binary", "unary"])
 
-        if expr_type == "single" or len(var_names) == 1:
+        if expr_type == "single":
             # 单个因子
             var = random.choice(var_names)
             individual = creator.Individual()
@@ -205,6 +210,20 @@ class GeneticFactorMiningService:
             individual = creator.Individual()
             individual.extend([expr])
             return individual
+
+    def _generate_single_var_expression(self, var_name: str) -> str:
+        """单基础因子场景下生成更有区分度的表达式。"""
+        expressions = [
+            var_name,
+            f"np.abs({var_name})",
+            f"{var_name}.shift(1)",
+            f"{var_name}.diff()",
+            f"({var_name} - {var_name}.rolling(5, min_periods=1).mean())",
+            f"{var_name}.rolling(5, min_periods=2).std()",
+            f"(({var_name} - {var_name}.shift(1)) / ({var_name}.shift(1).abs() + 1e-8))",
+            f"{var_name}.ewm(span=5, adjust=False).mean()",
+        ]
+        return random.choice(expressions)
 
     def _evaluate_factor(self, individual: list) -> tuple:
         """
@@ -436,6 +455,13 @@ class GeneticFactorMiningService:
         # 获取变量名列表
         var_names = list(self.base_factor_values.keys())
 
+        if len(var_names) == 1:
+            child1 = creator.Individual()
+            child1.extend([random.choice([expr1, expr2, self._generate_single_var_expression(var_names[0])])])
+            child2 = creator.Individual()
+            child2.extend([random.choice([expr1, expr2, self._generate_single_var_expression(var_names[0])])])
+            return (child1, child2)
+
         if not var_names:
             # 如果没有可用的因子变量，直接交换整个表达式
             return (ind2, ind1)
@@ -468,6 +494,11 @@ class GeneticFactorMiningService:
 
         # 获取变量名列表
         var_names = list(self.base_factor_values.keys())
+
+        if len(var_names) == 1 and random.random() < max(indpb, 0.4):
+            mutated = creator.Individual()
+            mutated.extend([self._generate_single_var_expression(var_names[0])])
+            return (mutated,)
 
         # 可能的变异操作：
         # 1. 更换运算符
