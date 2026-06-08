@@ -371,6 +371,7 @@
   border: 1px solid #e2e8f0 !important;
   border-radius: 12px !important;
   transition: all 0.2s;
+  overflow: hidden;
 }
 
 .factor-mining-container .factor-card:hover {
@@ -445,6 +446,50 @@
 .factor-mining-container .factor-actions {
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
+}
+
+.factor-mining-container .factor-card .ant-card-body {
+  padding: 20px;
+}
+
+.factor-mining-container .factor-card [id^="factor-details-"] {
+  width: 100%;
+  padding-top: 18px;
+  margin-top: 18px !important;
+  border-top: 1px solid #e2e8f0;
+}
+
+.factor-mining-container .factor-card [id^="factor-details-"] > * {
+  width: 100%;
+}
+
+.factor-mining-container .factor-card [id^="report-preview-"] {
+  width: 100%;
+  margin-top: 18px !important;
+}
+
+.factor-mining-container .report-preview-shell {
+  width: 100%;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.factor-mining-container .report-preview-frame-wrap {
+  width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: #fff;
+}
+
+.factor-mining-container .report-preview-frame {
+  width: 100%;
+  min-width: 1360px;
+  border: none;
+  display: block;
+  background: #fff;
 }
 
 /* ========== 结果操作按钮 ========== */
@@ -477,5 +522,9 @@
 
   .factor-mining-container .factor-stats .stat-row {
     justify-content: flex-start;
+  }
+
+  .factor-mining-container .report-preview-frame {
+    min-width: 0;
   }
 }

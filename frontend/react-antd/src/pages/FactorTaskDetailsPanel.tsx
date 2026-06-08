@@ -36,6 +36,12 @@ interface FactorTaskDetailsPanelProps {
   details?: FactorTaskDetails | null
 }
 
+const sectionCardBodyStyle = {
+  padding: 16,
+  background: 'rgba(248, 250, 252, 0.95)',
+  borderRadius: 16,
+} as const
+
 const fmtNum = (v: any, digits = 2) => {
   const n = Number(v)
   if (!Number.isFinite(n)) return undefined
@@ -59,10 +65,10 @@ const MetricGrid: React.FC<{ items: Array<{ label: string; value?: string }> }> 
   const visible = items.filter(item => item.value !== undefined)
   if (!visible.length) return null
   return (
-    <Row gutter={[10, 10]}>
+    <Row gutter={[12, 12]}>
       {visible.map((item) => (
-        <Col xs={12} md={6} key={item.label}>
-          <Card variant="borderless" bodyStyle={{ padding: 12, background: 'rgba(248, 250, 252, 0.95)', borderRadius: 12 }}>
+        <Col xs={24} sm={12} xl={6} key={item.label}>
+          <Card variant="borderless" bodyStyle={{ padding: 14, background: 'rgba(248, 250, 252, 0.95)', borderRadius: 14 }}>
             <div style={{ fontSize: 12, color: '#64748b', marginBottom: 6, wordBreak: 'break-word' }}>{item.label}</div>
             <div style={{ fontSize: 13, color: '#0f172a', lineHeight: 1.6, wordBreak: 'break-word', whiteSpace: 'pre-wrap' }}>{item.value}</div>
           </Card>
@@ -137,7 +143,14 @@ const FactorTaskDetailsPanel: React.FC<FactorTaskDetailsPanelProps> = ({ taskId,
   ]
 
   return (
-    <Card variant="borderless">
+    <Card
+      variant="borderless"
+      bodyStyle={{
+        padding: 0,
+        width: '100%',
+      }}
+      style={{ width: '100%' }}
+    >
       <Space direction="vertical" size={20} style={{ width: '100%' }}>
         <div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
@@ -202,7 +215,7 @@ const FactorTaskDetailsPanel: React.FC<FactorTaskDetailsPanelProps> = ({ taskId,
                 <MetricGrid items={quantSummaryItems} />
               </div>
             ) : null}
-            <Card variant="borderless" bodyStyle={{ padding: 14, background: 'rgba(248, 250, 252, 0.95)', borderRadius: 12 }}>
+            <Card variant="borderless" bodyStyle={sectionCardBodyStyle}>
               {details.interpretation?.conclusion ? <p style={{ fontSize: 13, color: '#0f172a', lineHeight: 1.6 }}><strong>Conclusion: </strong>{fmtText(details.interpretation.conclusion)}</p> : null}
               {details.interpretation?.logic ? <p style={{ fontSize: 13, color: '#0f172a', lineHeight: 1.6 }}><strong>Logic: </strong>{fmtText(details.interpretation.logic)}</p> : null}
               {details.interpretation?.guidance ? <p style={{ fontSize: 13, color: '#0f172a', lineHeight: 1.6, marginBottom: 0 }}><strong>Guidance: </strong>{fmtText(details.interpretation.guidance)}</p> : null}
@@ -217,7 +230,7 @@ const FactorTaskDetailsPanel: React.FC<FactorTaskDetailsPanelProps> = ({ taskId,
               <iframe
                 src={quantgptReportLink}
                 title="QuantGPT Report"
-                style={{ width: '100%', height: 420, border: 0, display: 'block', background: '#fff' }}
+                style={{ width: '100%', minWidth: 0, height: 560, border: 0, display: 'block', background: '#fff' }}
               />
             </Card>
           </div>
@@ -230,7 +243,7 @@ const FactorTaskDetailsPanel: React.FC<FactorTaskDetailsPanelProps> = ({ taskId,
               <iframe
                 src={factorhubReportLink}
                 title="FactorHub Backtest Report"
-                style={{ width: '100%', height: 640, border: 0, display: 'block', background: '#fff' }}
+                style={{ width: '100%', minWidth: 0, height: 760, border: 0, display: 'block', background: '#fff' }}
               />
             </Card>
           </div>

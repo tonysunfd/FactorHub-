@@ -2568,12 +2568,15 @@ const FactorMining: React.FC = () => {
           </Space>
 
           {resolvedReportUrl && expandedReportUrl === resolvedReportUrl ? (
-            <div id={`report-preview-${encodeURIComponent(resolvedReportUrl)}`} style={{ border: "1px solid #e5e7eb", borderRadius: 8, overflow: "hidden", background: "#fff" }}>
-              <iframe
-                title={`${report.title || "RDAgent 手动挖掘报告"} 预览`}
-                src={resolvedReportUrl}
-                style={{ width: "100%", height: 520, border: 0, display: "block" }}
-              />
+            <div id={`report-preview-${encodeURIComponent(resolvedReportUrl)}`} className="report-preview-shell">
+              <div className="report-preview-frame-wrap">
+                <iframe
+                  title={`${report.title || "RDAgent 手动挖掘报告"} 预览`}
+                  src={resolvedReportUrl}
+                  className="report-preview-frame"
+                  style={{ height: 520 }}
+                />
+              </div>
             </div>
           ) : null}
 
@@ -3439,15 +3442,18 @@ const FactorMining: React.FC = () => {
                           </div>
                         ) : null}
                         {factorReportUrl && expandedReportUrl === resolveReportUrl(factorReportUrl) ? (
-                          <div id={`report-preview-${encodeURIComponent(resolveReportUrl(factorReportUrl))}`} style={{ marginTop: 16, border: "1px solid #e5e7eb", borderRadius: 8, overflow: "hidden", background: "#fff" }}>
+                          <div id={`report-preview-${encodeURIComponent(resolveReportUrl(factorReportUrl))}`} className="report-preview-shell" style={{ marginTop: 16 }}>
                             <div style={{ padding: "10px 12px", borderBottom: "1px solid #e5e7eb", fontSize: 13, color: "#64748b" }}>
                               报告预览
                             </div>
-                            <iframe
-                              src={resolveReportUrl(factorReportUrl)}
-                              title={`retained-report-preview-${index}`}
-                              style={{ width: "100%", height: 720, border: "none", display: "block", background: "#fff" }}
-                            />
+                            <div className="report-preview-frame-wrap">
+                              <iframe
+                                src={resolveReportUrl(factorReportUrl)}
+                                title={`retained-report-preview-${index}`}
+                                className="report-preview-frame"
+                                style={{ height: 720 }}
+                              />
+                            </div>
                           </div>
                         ) : null}
                       </Card>
@@ -3752,15 +3758,18 @@ const FactorMining: React.FC = () => {
                     </div>
                   ) : null}
                   {isAutoLikeTab && factorReportUrl && expandedReportUrl === resolveReportUrl(factorReportUrl) ? (
-                    <div id={`report-preview-${encodeURIComponent(resolveReportUrl(factorReportUrl))}`} style={{ marginTop: 16, border: "1px solid #e5e7eb", borderRadius: 8, overflow: "hidden", background: "#fff" }}>
+                    <div id={`report-preview-${encodeURIComponent(resolveReportUrl(factorReportUrl))}`} className="report-preview-shell" style={{ marginTop: 16 }}>
                       <div style={{ padding: "10px 12px", borderBottom: "1px solid #e5e7eb", fontSize: 13, color: "#64748b" }}>
                         报告预览
                       </div>
-                      <iframe
-                        src={resolveReportUrl(factorReportUrl)}
-                        title={`report-preview-${index}`}
-                        style={{ width: "100%", height: 720, border: "none", display: "block", background: "#fff" }}
-                      />
+                      <div className="report-preview-frame-wrap">
+                        <iframe
+                          src={resolveReportUrl(factorReportUrl)}
+                          title={`report-preview-${index}`}
+                          className="report-preview-frame"
+                          style={{ height: 720 }}
+                        />
+                      </div>
                     </div>
                   ) : null}
                 </Card>
