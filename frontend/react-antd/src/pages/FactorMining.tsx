@@ -89,6 +89,7 @@ interface AutoFactor {
   name: string;
   expression: string;
   score: number;
+  category?: string;
   factor_id?: number;
   grade?: string;
   report_url?: string;
@@ -336,6 +337,19 @@ const buildFactorTaskDetailsForDashboard = (factor: Partial<AutoFactor> | null |
       wq_fitness: factor.wq_brain?.wq_fitness,
     },
   });
+};
+
+const resolveSavedFactorCategory = (
+  activeMode: MiningMode,
+  factor: Partial<AutoFactor> | Partial<ManualFactor> | null | undefined,
+) => {
+  if (activeMode === "manual") return "遗传挖掘";
+
+  const rawCategory = (factor as AutoFactor | undefined)?.category;
+  const candidateCategory = typeof rawCategory === "string" ? rawCategory.trim() : "";
+  if (candidateCategory) return candidateCategory;
+
+  return activeMode === "rdagent" ? "RDAgent 挖掘" : "自动挖掘";
 };
 
 const normalizeRDAgentFactorForDashboard = (factor: any, roundIndex?: number, taskId?: string): AutoFactor => {
@@ -2016,7 +2030,7 @@ const FactorMining: React.FC = () => {
       const response = (await api.createFactor({
         name: factorName,
         code: factorCode,
-        category: activeTab === "manual" ? "遗传挖掘" : activeTab === "rdagent" ? "RDAgent 挖掘" : "自动挖掘",
+        category: resolveSavedFactorCategory(activeTab, factor),
         description,
         formula_type: "function",
         scope_type: activeTab === "manual" ? "stock" : "universe",
