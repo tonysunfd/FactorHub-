@@ -67,6 +67,37 @@ const OPTIMIZATION_DIRECTION_OPTIONS = [
   { label: "优化 Report Sharpe", value: "report_sharpe" },
 ];
 
+const buildLlmSelectionEvidence = (payload?: Record<string, any> | null) => {
+  if (!payload?.llm_used) {
+    return {
+      title: "",
+      details: "",
+    };
+  }
+  const evidence = payload?.llm_evidence || {};
+  const model = evidence?.model || payload?.llm_model || "deepseek-chat";
+  const callMode = evidence?.call_mode || payload?.llm_call_mode || "";
+  const detailLines = [
+    `候选池：${payload?.candidate_count || 0} 个`,
+  ];
+  if (callMode) {
+    detailLines.push(`调用方式：${callMode}`);
+  }
+  if (evidence?.provider || payload?.llm_provider) {
+    detailLines.push(`Provider：${evidence?.provider || payload.llm_provider}`);
+  }
+  if (evidence?.base_url || payload?.llm_base_url) {
+    detailLines.push(`Endpoint：${evidence?.base_url || payload.llm_base_url}`);
+  }
+  if (evidence?.response_id || payload?.llm_response_id) {
+    detailLines.push(`Response ID：${evidence?.response_id || payload.llm_response_id}`);
+  }
+  return {
+    title: `本次已真实调用 LLM API：${model}`,
+    details: detailLines.join("\n"),
+  };
+};
+
 type MiningMode = "manual" | "auto" | "rdagent";
 type RDAgentBootstrapMode = "manual" | "llm_auto";
 type PersistedMiningTaskKind = "genetic" | "auto" | "auto_campaign" | "auto_continue";
@@ -165,7 +196,7 @@ interface AutoCampaignRoundSummary {
   task_id: string;
   best_score: number;
   avg_score: number;
-  input_base_factors: string[];
+  input_base_factors?: string[];
   previous_base_factors?: string[];
   factor_changes?: {
     added?: string[];
@@ -181,10 +212,30 @@ interface AutoCampaignRoundSummary {
     reason?: string;
     target_goal?: string;
     primary_problem?: string;
+    secondary_problem?: string;
+    selection_instructions?: string;
+    preferred_keywords?: string[];
+    avoid_keywords?: string[];
+    selection_confidence?: number;
+    should_adjust_base_factors?: boolean;
+    hold_reason?: string;
+    replace_base_factors?: string[];
+    selected_for_next_round?: string[];
+    next_round_candidate_factors?: string[];
+    next_round_selected_factors?: string[];
+    next_round_should_adjust_base_factors?: boolean;
+    next_round_hold_reason?: string;
+    next_round_selection_confidence?: number;
+    next_round_parent_base_factors?: string[];
+    next_round_replace_base_factors?: string[];
+    next_round_forced_exploration?: boolean;
+    next_round_forced_exploration_reason?: string;
+    next_round_seed_expression?: string;
     current_base_factors?: string[];
     candidate_factors?: string[];
     factor_update_mode?: string;
   };
+  continuation_plan?: AutoCampaignRoundSummary["continuation_hypothesis"];
   continuation_feedback?: {
     decision?: boolean;
     accepted_as_best?: boolean;
@@ -197,8 +248,10 @@ interface AutoCampaignRoundSummary {
     next_hypothesis?: string;
   };
   retained_count: number;
-  retained_factors: AutoFactor[];
-  all_factors: AutoFactor[];
+  retained_factors?: AutoFactor[];
+  all_factors?: AutoFactor[];
+  round_evaluation?: Record<string, any>;
+  final_round_evaluation?: Record<string, any>;
 }
 
 interface AutoCampaignResult {
@@ -206,6 +259,12 @@ interface AutoCampaignResult {
   retained_factors: AutoFactor[];
   final_round_task_id?: string;
   final_round_result?: AutoMiningResult;
+  latest_round_task_id?: string;
+  latest_round_result?: AutoMiningResult;
+  latest_round_retained_factors?: AutoFactor[];
+  best_parent_task_id?: string;
+  best_parent_result?: AutoMiningResult;
+  best_parent_retained_factors?: AutoFactor[];
   best_score: number;
   avg_score: number;
   fitness_history?: { best: number[]; average: number[] };
@@ -213,6 +272,13 @@ interface AutoCampaignResult {
   retention_filter?: Record<string, any>;
   manual_report?: Record<string, any>;
   continue_mining_request?: Record<string, any>;
+}
+
+interface CampaignReferenceInfo {
+  finalRoundTaskId?: string;
+  finalRoundBaseFactors: string[];
+  bestParentTaskId?: string;
+  bestParentBaseFactors: string[];
 }
 
 interface RDAgentTraceRound {
@@ -230,6 +296,7 @@ interface RDAgentTraceRound {
   all_factors?: AutoFactor[];
   manual_report?: Record<string, any>;
   continue_mining_request?: Record<string, any>;
+  final_round_evaluation?: Record<string, any>;
 }
 
 interface AutoMiningSeedState {
@@ -470,6 +537,12 @@ const normalizeAutoCampaignResultForDashboard = (result: AutoCampaignResult | nu
           ...result.final_round_result,
           factors: finalRoundFactors.map((factor: any) => ({
             ...factor,
+            automation_meta: {
+              ...(factor?.automation_meta || {}),
+              round_index: factor?.automation_meta?.round_index ?? finalRound?.round_index,
+              round_task_id: factor?.automation_meta?.round_task_id || finalRound?.task_id,
+              source: factor?.automation_meta?.source || "auto_campaign",
+            },
             task_details: buildFactorTaskDetailsForDashboard(factor) || factor?.task_details || factor?.quantgpt_task_details,
             quantgpt_task_details: buildFactorTaskDetailsForDashboard(factor) || factor?.quantgpt_task_details || factor?.task_details,
           })),
@@ -635,6 +708,31 @@ const getCampaignRoundEvaluation = (result: AutoCampaignResult | null): Record<s
   );
 };
 
+const getAutoCampaignDisplayedFactors = (result: AutoCampaignResult | null | undefined): AutoFactor[] => {
+  if (!result) return [];
+  return (
+    result.final_round_result?.factors
+    || result.latest_round_result?.factors
+    || result.latest_round_retained_factors
+    || []
+  ) as AutoFactor[];
+};
+
+const getAutoCampaignReferenceInfo = (result: AutoCampaignResult | null | undefined): CampaignReferenceInfo | null => {
+  if (!result) return null;
+  const finalRoundBaseFactors = result.final_round_result?.round_evaluation?.base_factors
+    || result.latest_round_result?.round_evaluation?.base_factors
+    || [];
+  const bestParentBaseFactors = result.best_parent_result?.round_evaluation?.base_factors
+    || [];
+  return {
+    finalRoundTaskId: result.final_round_task_id || result.latest_round_task_id,
+    finalRoundBaseFactors: Array.isArray(finalRoundBaseFactors) ? finalRoundBaseFactors : [],
+    bestParentTaskId: result.best_parent_task_id,
+    bestParentBaseFactors: Array.isArray(bestParentBaseFactors) ? bestParentBaseFactors : [],
+  };
+};
+
 const loadPersistedRDAgentTaskState = (): PersistedRDAgentTaskState | null => {
   if (typeof window === "undefined") return null;
   try {
@@ -796,7 +894,8 @@ const FactorMining: React.FC = () => {
   const [rdagentLoadingLatest, setRdagentLoadingLatest] = useState(false);
   const [continueSelectingFactors, setContinueSelectingFactors] = useState(false);
   const [showContinuePanel, setShowContinuePanel] = useState(false);
-  const [llmSelectionSummary, setLlmSelectionSummary] = useState<string>("");
+  const [manualLlmSelectionSummary, setManualLlmSelectionSummary] = useState<string>("");
+  const [autoLlmSelectionSummary, setAutoLlmSelectionSummary] = useState<string>("");
   const [rdagentSelectionSummary, setRdagentSelectionSummary] = useState<string>("");
   const [continueSelectionSummary, setContinueSelectionSummary] = useState<string>("");
   const [rdagentBootstrapMode, setRdagentBootstrapMode] = useState<RDAgentBootstrapMode>("llm_auto");
@@ -860,12 +959,45 @@ const FactorMining: React.FC = () => {
     });
   };
 
+  const patchAutoCampaignDisplayedFactor = (targetIndex: number, updater: (factor: AutoFactor) => AutoFactor) => {
+    setAutoCampaignResult((prev) => {
+      if (!prev) return prev;
+      const displayedFactors = getAutoCampaignDisplayedFactors(prev);
+      if (!displayedFactors[targetIndex]) return prev;
+      const nextDisplayed = displayedFactors.map((factor, index) =>
+        index === targetIndex ? updater(factor) : factor
+      );
+      const nextFinalRoundResult = prev.final_round_result
+        ? {
+            ...prev.final_round_result,
+            factors: nextDisplayed,
+          }
+        : prev.final_round_result;
+      const nextLatestRoundResult = prev.latest_round_result
+        ? {
+            ...prev.latest_round_result,
+            factors: nextDisplayed,
+          }
+        : prev.latest_round_result;
+      return {
+        ...prev,
+        final_round_result: nextFinalRoundResult,
+        latest_round_result: nextLatestRoundResult,
+        latest_round_retained_factors: nextDisplayed,
+      };
+    });
+  };
+
   const patchCurrentDisplayedFactor = (targetIndex: number, updater: (factor: AutoFactor) => AutoFactor) => {
     if (activeTab === "rdagent") {
       patchAutoCampaignRetainedFactor(targetIndex, updater);
       return;
     }
     if (activeTab === "auto") {
+      if (autoWorkflowMode === "campaign") {
+        patchAutoCampaignDisplayedFactor(targetIndex, updater);
+        return;
+      }
       patchAutoResultFactor(targetIndex, updater);
     }
   };
@@ -955,7 +1087,7 @@ const FactorMining: React.FC = () => {
       stock_code: "000001",
       dateRange: [startDate, endDate],
       manual_prompt: "为当前股票挑选一组更适合手动遗传挖掘的基础因子，优先保证稳定性和可解释性。",
-      manual_direction: "stability",
+      manual_direction: "report_sharpe",
       manual_max_factor_count: 8,
       population_size: 50,
       n_generations: 10,
@@ -1060,6 +1192,25 @@ const FactorMining: React.FC = () => {
       resultChartInstanceRef.current?.dispose();
     };
   }, []);
+
+  useEffect(() => {
+    if (activeTab === "auto") {
+      setManualLlmSelectionSummary("");
+      setRdagentSelectionSummary("");
+      return;
+    }
+    if (activeTab === "manual") {
+      setAutoLlmSelectionSummary("");
+      setContinueSelectionSummary("");
+      setRdagentSelectionSummary("");
+      return;
+    }
+    if (activeTab === "rdagent") {
+      setManualLlmSelectionSummary("");
+      setAutoLlmSelectionSummary("");
+      setContinueSelectionSummary("");
+    }
+  }, [activeTab]);
 
   useEffect(() => {
     if (typeof document === "undefined" || typeof window === "undefined") {
@@ -1531,7 +1682,7 @@ const FactorMining: React.FC = () => {
       const values = await autoForm.validateFields(["prompt", "dateRange", "universe", "benchmark", "direction", "max_factor_count"]);
       const [startDate, endDate] = values.dateRange;
       setLlmSelectingFactors(true);
-      setLlmSelectionSummary("");
+      setAutoLlmSelectionSummary("");
       const response = (await autoMiningApi.selectFactors({
         prompt: values.prompt,
         direction: values.direction,
@@ -1549,8 +1700,14 @@ const FactorMining: React.FC = () => {
       const nextValues = { ...autoForm.getFieldsValue(), base_factors: selectedFactors };
       autoForm.setFieldsValue({ base_factors: selectedFactors });
       persistAutoMiningForm({}, nextValues);
-      setLlmSelectionSummary(response?.data?.selection_rationale || "");
-      message.success(response?.message || `LLM 已在上限范围内自动筛选 ${selectedFactors.length} 个基础因子`);
+      const llmEvidence = buildLlmSelectionEvidence(response?.data);
+      setAutoLlmSelectionSummary([llmEvidence.title, response?.data?.selection_rationale || "", llmEvidence.details].filter(Boolean).join("\n\n"));
+      message.success(
+        response?.message
+        || (llmEvidence.title
+          ? `${llmEvidence.title}，并在上限范围内自动筛选 ${selectedFactors.length} 个基础因子`
+          : `已筛选 ${selectedFactors.length} 个基础因子`)
+      );
     } catch (error: any) {
       message.error(error?.message || "LLM 自动筛选因子失败");
     } finally {
@@ -1560,29 +1717,41 @@ const FactorMining: React.FC = () => {
 
   const handleManualLLMSelectFactors = async () => {
     try {
-      const values = await manualForm.validateFields(["manual_prompt", "dateRange", "manual_direction", "manual_max_factor_count"]);
+      const values = await manualForm.validateFields([
+        "stock_code",
+        "manual_prompt",
+        "dateRange",
+        "manual_direction",
+        "manual_max_factor_count",
+        "fitness_objective",
+      ]);
       const [startDate, endDate] = values.dateRange;
       const manualPrompt = String(values.manual_prompt || "").trim() || "为当前股票挑选一组更适合手动遗传挖掘的基础因子，优先保证稳定性和可解释性。";
       setLlmSelectingFactors(true);
-      setLlmSelectionSummary("");
-      const response = (await autoMiningApi.selectFactors({
+      setManualLlmSelectionSummary("");
+      const response = (await autoMiningApi.selectManualFactors({
         prompt: manualPrompt,
         direction: values.manual_direction,
+        stock_code: String(values.stock_code || "").trim(),
         start_date: startDate.format("YYYY-MM-DD"),
         end_date: endDate.format("YYYY-MM-DD"),
-        universe: "single_stock",
-        benchmark: "hs300",
+        fitness_objective: values.fitness_objective,
         max_factor_count: Number(values.manual_max_factor_count || 8),
         candidate_limit: 80,
-        selection_mode: "manual_genetic",
       })) as any;
       const selectedFactors = response?.data?.selected_factors || [];
       if (!selectedFactors.length) {
         throw new Error("LLM 未返回可用因子");
       }
       manualForm.setFieldsValue({ base_factors: selectedFactors });
-      setLlmSelectionSummary(response?.data?.selection_rationale || "");
-      message.success(response?.message || `LLM 已自动筛选 ${selectedFactors.length} 个手动挖掘基础因子`);
+      const llmEvidence = buildLlmSelectionEvidence(response?.data);
+      setManualLlmSelectionSummary([llmEvidence.title, response?.data?.selection_rationale || "", llmEvidence.details].filter(Boolean).join("\n\n"));
+      message.success(
+        response?.message
+        || (llmEvidence.title
+          ? `${llmEvidence.title}，并自动筛选 ${selectedFactors.length} 个手动挖掘基础因子`
+          : `已筛选 ${selectedFactors.length} 个手动挖掘基础因子`)
+      );
     } catch (error: any) {
       message.error(error?.message || "LLM 自动筛选手动挖掘因子失败");
     } finally {
@@ -2332,7 +2501,9 @@ const FactorMining: React.FC = () => {
         ? manualResult?.factors
         : activeTab === "rdagent"
           ? autoCampaignResult?.retained_factors
-          : autoResult?.factors
+          : autoWorkflowMode === "campaign"
+            ? getAutoCampaignDisplayedFactors(autoCampaignResult)
+            : autoResult?.factors
     ) || [];
     if (!factorsToSave.length) {
       message.warning("没有可保存的因子");
@@ -2445,7 +2616,9 @@ const FactorMining: React.FC = () => {
     const currentFactors = (
       activeTab === "rdagent"
         ? autoCampaignResult?.retained_factors
-        : autoResult?.factors
+        : autoWorkflowMode === "campaign"
+          ? getAutoCampaignDisplayedFactors(autoCampaignResult)
+          : autoResult?.factors
     ) || [];
     const factorIds = currentFactors
       .map((factor) => factor.factor_id)
@@ -3432,6 +3605,9 @@ const FactorMining: React.FC = () => {
         const latestRDAgentRound = rdagentRounds[rdagentRounds.length - 1];
         const rdagentManualReport = latestRDAgentRound?.manual_report || autoCampaignResult.manual_report;
         const rdagentContinueRequest = latestRDAgentRound?.continue_mining_request || autoCampaignResult.continue_mining_request;
+        const autoCampaignDisplayedFactors = isRDAgentResult
+          ? (autoCampaignResult.retained_factors || [])
+          : getAutoCampaignDisplayedFactors(autoCampaignResult);
         return (
           <div className="result-shell">
             <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
@@ -3503,7 +3679,11 @@ const FactorMining: React.FC = () => {
                 description="保留轮次演进信息，但收成面向操作的摘要卡，不让说明性文字压住主界面。"
               >
                 <div className="factors-list">
-                  {autoCampaignResult.rounds.map((round) => (
+                  {autoCampaignResult.rounds.map((round, roundIndex) => {
+                    const previousRound = roundIndex > 0 ? autoCampaignResult.rounds[roundIndex - 1] : null;
+                    const previousRoundEvaluation = previousRound?.final_round_evaluation || previousRound?.round_evaluation || null;
+                    const continuationPlan = round.continuation_plan || round.continuation_hypothesis || null;
+                    return (
                     <Card key={round.task_id} className="factor-card" size="small">
                       <div className="factor-header">
                         <div className="factor-info">
@@ -3523,20 +3703,58 @@ const FactorMining: React.FC = () => {
                       </div>
                       {round.round_index > 1 ? (
                         <div style={{ marginTop: 12 }}>
-                          {round.continuation_hypothesis?.hypothesis ? (
+                          {previousRoundEvaluation ? (
+                            <Alert
+                              type="warning"
+                              showIcon
+                              style={{ marginBottom: 8 }}
+                              message="上一轮单轮研究诊断"
+                              description={
+                                <Space direction="vertical" size={4}>
+                                  {previousRoundEvaluation.primary_problem ? (
+                                    <span>主要问题：{previousRoundEvaluation.primary_problem}</span>
+                                  ) : null}
+                                  {previousRoundEvaluation.secondary_problem ? (
+                                    <span style={{ color: "#475569" }}>次要问题：{previousRoundEvaluation.secondary_problem}</span>
+                                  ) : null}
+                                  {previousRoundEvaluation.recommended_goal ? (
+                                    <span style={{ color: "#475569" }}>建议目标：{previousRoundEvaluation.recommended_goal}</span>
+                                  ) : null}
+                                </Space>
+                              }
+                            />
+                          ) : null}
+                          {continuationPlan?.hypothesis ? (
                             <Alert
                               type="info"
                               showIcon
                               style={{ marginBottom: 8 }}
-                              message="本轮研究假设"
+                              message="承接上一轮分析的本轮探索计划"
                               description={
                                 <Space direction="vertical" size={4}>
-                                  <span>{round.continuation_hypothesis.hypothesis}</span>
-                                  {round.continuation_hypothesis.reason ? (
-                                    <span style={{ color: "#475569" }}>原因：{round.continuation_hypothesis.reason}</span>
+                                  <span>{continuationPlan?.hypothesis}</span>
+                                  {continuationPlan?.reason ? (
+                                    <span style={{ color: "#475569" }}>承接原因：{continuationPlan?.reason}</span>
                                   ) : null}
-                                  {round.continuation_hypothesis.target_goal ? (
-                                    <span style={{ color: "#475569" }}>目标：{round.continuation_hypothesis.target_goal}</span>
+                                  {continuationPlan?.target_goal ? (
+                                    <span style={{ color: "#475569" }}>目标：{continuationPlan?.target_goal}</span>
+                                  ) : null}
+                                  {continuationPlan?.selection_instructions ? (
+                                    <span style={{ color: "#475569", whiteSpace: "pre-wrap" }}>
+                                      选因子指令：{continuationPlan?.selection_instructions}
+                                    </span>
+                                  ) : null}
+                                  {Array.isArray(continuationPlan?.preferred_keywords) && continuationPlan?.preferred_keywords?.length ? (
+                                    <span style={{ color: "#475569" }}>优先关键词：{continuationPlan?.preferred_keywords?.join("，")}</span>
+                                  ) : null}
+                                  {Array.isArray(continuationPlan?.avoid_keywords) && continuationPlan?.avoid_keywords?.length ? (
+                                    <span style={{ color: "#475569" }}>避免关键词：{continuationPlan?.avoid_keywords?.join("，")}</span>
+                                  ) : null}
+                                  {typeof continuationPlan?.selection_confidence === "number" ? (
+                                    <span style={{ color: "#475569" }}>计划置信度：{continuationPlan?.selection_confidence}</span>
+                                  ) : null}
+                                  {continuationPlan?.hold_reason ? (
+                                    <span style={{ color: "#475569" }}>保持原因：{continuationPlan?.hold_reason}</span>
                                   ) : null}
                                 </Space>
                               }
@@ -3612,22 +3830,53 @@ const FactorMining: React.FC = () => {
                         </div>
                       ) : null}
                     </Card>
-                  ))}
+                  )})}
                 </div>
               </ResultSection>
             ) : null}
 
             <ResultSection
               kicker={isRDAgentResult ? "人工确认区" : "最终产出"}
-              title={isRDAgentResult ? "候选因子（需人工确认）" : "保留的因子"}
-              description={isRDAgentResult ? "这里只放需要你判断和保存的候选，操作优先，证据详情按需展开。" : "最终保留下来的因子集中在这一组，报告和任务详情都按需展开。"}
+              title={isRDAgentResult ? "候选因子（需人工确认）" : (autoWorkflowMode === "campaign" ? "最终产出（最后一轮）" : "保留的因子")}
+              description={
+                isRDAgentResult
+                  ? "这里只放需要你判断和保存的候选，操作优先，证据详情按需展开。"
+                  : (autoWorkflowMode === "campaign"
+                      ? "这里固定展示连续探索最后一轮的真实产出；最佳 parent 只作为参考，不再混入当前结果。"
+                      : "最终保留下来的因子集中在这一组，报告和任务详情都按需展开。")
+              }
               extra={isRDAgentResult ? <Tag color="gold">配置页视图</Tag> : <Tag color="blue">结果清单</Tag>}
             >
-              {!autoCampaignResult.retained_factors?.length ? (
+              {!isRDAgentResult && autoWorkflowMode === "campaign" && autoCampaignResult ? (
+                <Alert
+                  type="info"
+                  showIcon
+                  style={{ marginBottom: 16 }}
+                  message="连续探索结果说明"
+                  description={(() => {
+                    const referenceInfo = getAutoCampaignReferenceInfo(autoCampaignResult);
+                    if (!referenceInfo) return "当前结果优先展示最后一轮产出。";
+                    return [
+                      referenceInfo.finalRoundTaskId ? `当前展示任务：${referenceInfo.finalRoundTaskId}` : "",
+                      referenceInfo.finalRoundBaseFactors.length
+                        ? `最后一轮基础因子：${referenceInfo.finalRoundBaseFactors.join("，")}`
+                        : "",
+                      referenceInfo.bestParentTaskId
+                        ? `最佳 parent 参考：${referenceInfo.bestParentTaskId}`
+                        : "",
+                      referenceInfo.bestParentBaseFactors.length
+                        ? `最佳 parent 基础因子：${referenceInfo.bestParentBaseFactors.join("，")}`
+                        : "",
+                    ].filter(Boolean).join("\n")
+                      || "当前结果优先展示最后一轮产出。";
+                  })()}
+                />
+              ) : null}
+              {!autoCampaignDisplayedFactors?.length ? (
                 <Alert message={isRDAgentResult ? "本轮没有候选因子达到待确认条件" : "没有因子满足当前筛选条件"} type="info" showIcon />
               ) : (
                 <div className="factors-list">
-                  {autoCampaignResult.retained_factors.map((factor: any, index: number) => {
+                  {autoCampaignDisplayedFactors.map((factor: any, index: number) => {
                     const meta = factor.automation_meta || {};
                     const detailKey = getFactorDetailKey(factor, index);
                     const clientKey = getFactorClientKey(factor, index);
@@ -4248,7 +4497,15 @@ const FactorMining: React.FC = () => {
                           LLM 自动从因子库筛选基础因子
                         </Button>
                       </Form.Item>
-                      {llmSelectionSummary ? <Alert type="info" showIcon style={{ marginBottom: 16 }} message="LLM 筛选说明" description={llmSelectionSummary} /> : null}
+                      {manualLlmSelectionSummary ? (
+                        <Alert
+                          type="success"
+                          showIcon
+                          style={{ marginBottom: 16 }}
+                          message="已真实调用 LLM API 完成手动挖掘因子筛选"
+                          description={manualLlmSelectionSummary}
+                        />
+                      ) : null}
                       <Form.Item name="base_factors" rules={[{ required: true, message: "请至少选择一个基础因子" }]}>
                         <Select mode="multiple" placeholder="输入因子名称搜索" showSearch optionLabelProp="label" maxTagCount="responsive">{renderFactorOptions()}</Select>
                       </Form.Item>
@@ -4304,7 +4561,7 @@ const FactorMining: React.FC = () => {
                           <Form.Item>
                             <Button block onClick={() => void handleLLMSelectFactors()} loading={llmSelectingFactors}>LLM 自动从因子库筛选因子</Button>
                           </Form.Item>
-                          {llmSelectionSummary ? <Alert type="info" showIcon style={{ marginBottom: 16 }} message="LLM 已完成因子筛选" description={llmSelectionSummary} /> : null}
+                          {autoLlmSelectionSummary ? <Alert type="info" showIcon style={{ marginBottom: 16 }} message="LLM 已完成因子筛选" description={autoLlmSelectionSummary} /> : null}
 
                           <Form.Item name="base_factors" rules={[{ required: true, message: "请至少导入一个基础因子" }]}>
                             <Select mode="multiple" placeholder="选择要导入的因子" showSearch optionLabelProp="label" maxTagCount="responsive">{renderFactorOptions()}</Select>
@@ -4496,7 +4753,7 @@ const FactorMining: React.FC = () => {
                           <Form.Item>
                             <Button onClick={() => void handleLLMSelectFactors()} loading={llmSelectingFactors}>LLM 自动从因子库筛选因子</Button>
                           </Form.Item>
-                          {llmSelectionSummary ? <Alert type="info" showIcon style={{ marginBottom: 16 }} message="LLM 已完成因子筛选" description={llmSelectionSummary} /> : null}
+                          {autoLlmSelectionSummary ? <Alert type="info" showIcon style={{ marginBottom: 16 }} message="LLM 已完成因子筛选" description={autoLlmSelectionSummary} /> : null}
 
                           <Divider styles={{ content: { margin: 0 } }} titlePlacement="left">从因子库导入</Divider>
                           <Form.Item name="base_factors" rules={[{ required: true, message: "请至少导入一个基础因子" }]}>
