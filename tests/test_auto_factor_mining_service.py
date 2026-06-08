@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 from types import SimpleNamespace
 
 from backend.services.auto_factor_mining_service import AutoFactorMiningService
@@ -244,6 +245,131 @@ def test_run_auto_campaign_progress_uses_current_round_snapshot(monkeypatch) -> 
     assert latest_round["continuation_feedback"] is None
     assert latest_round["input_base_factors"] == ["Alpha1", "ExtraFactor"]
     assert latest_round["all_factors"][0]["expression"] == "expr_2"
+
+
+def test_select_factors_uses_real_llm_flow(monkeypatch) -> None:
+    service = AutoFactorMiningService()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "backend.services.auto_factor_mining_service.factor_selection_service.load_factor_candidates_for_llm",
+        lambda limit, selection_mode: [
+            {"name": "AlphaClose", "code": "close", "category": "price", "description": "close factor"},
+            {"name": "AlphaVolume", "code": "volume", "category": "volume", "description": "volume factor"},
+        ],
+    )
+    monkeypatch.setattr(
+        "backend.services.auto_factor_mining_service.llm_config_service.get_runtime_config",
+        lambda: {"api_key": "test-key", "model": "deepseek-chat", "base_url": "https://example.com/v1"},
+    )
+
+    def fake_build_prompt(request, candidates):
+        captured["request"] = request
+        captured["candidates"] = candidates
+        return "LLM PROMPT"
+
+    def fake_select_with_llm(**kwargs):
+        captured["llm_kwargs"] = kwargs
+        return {
+            "selected_factors": ["AlphaVolume", "AlphaClose"],
+            "selection_rationale": "LLM 按研究目标选择了量价互补因子。",
+            "per_factor_reason": {
+                "AlphaVolume": "成交量维度补充趋势信息。",
+                "AlphaClose": "价格维度提供主要趋势信息。",
+            },
+        }
+
+    monkeypatch.setattr("backend.services.auto_factor_mining_service.build_llm_factor_selector_prompt", fake_build_prompt)
+    monkeypatch.setattr(service, "_select_factors_with_llm", fake_select_with_llm)
+
+    result = service.select_factors(
+        prompt="寻找趋势突破因子",
+        direction="ls_sharpe",
+        start_date="2024-01-01",
+        end_date="2024-12-31",
+        universe="single_stock",
+        benchmark="hs300",
+        max_factor_count=2,
+        candidate_limit=80,
+        selection_mode="manual_genetic",
+        extra_context="补充控制波动率",
+        exclude_factors=["AlphaClose"],
+    )
+
+    assert result["selected_factors"] == ["AlphaVolume", "AlphaClose"]
+    assert captured["llm_kwargs"]["prompt"] == "LLM PROMPT\n\n补充上下文：\n补充控制波动率"
+    assert captured["llm_kwargs"]["max_factor_count"] == 2
+    assert captured["llm_kwargs"]["candidates"] == [
+        {"name": "AlphaVolume", "code": "volume", "category": "volume", "description": "volume factor"},
+    ]
+    request = captured["request"]
+    assert request.prompt == "寻找趋势突破因子"
+    assert request.direction == "ls_sharpe"
+    assert request.start_date == "2024-01-01"
+    assert request.end_date == "2024-12-31"
+    assert request.universe == "single_stock"
+    assert request.benchmark == "hs300"
+    assert request.selection_mode == "manual_genetic"
+
+
+def test_select_factors_requires_llm_api_key(monkeypatch) -> None:
+    service = AutoFactorMiningService()
+    monkeypatch.setattr(
+        "backend.services.auto_factor_mining_service.factor_selection_service.load_factor_candidates_for_llm",
+        lambda limit, selection_mode: [{"name": "AlphaClose", "code": "close"}],
+    )
+    monkeypatch.setattr(
+        "backend.services.auto_factor_mining_service.llm_config_service.get_runtime_config",
+        lambda: {"api_key": ""},
+    )
+
+    with pytest.raises(ValueError, match="LLM 未配置 API Key"):
+        service.select_factors(
+            prompt="寻找趋势突破因子",
+            start_date="2024-01-01",
+            end_date="2024-12-31",
+            universe="single_stock",
+            benchmark="hs300",
+        )
+
+
+def test_select_factors_with_llm_filters_unknown_names(monkeypatch) -> None:
+    service = AutoFactorMiningService()
+
+    class FakeResponse:
+        def __init__(self, content: str) -> None:
+            self.choices = [SimpleNamespace(message=SimpleNamespace(content=content))]
+
+    class FakeClient:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+        @property
+        def chat(self):
+            return SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=lambda **kwargs: FakeResponse(
+                        '{"selected_factors":["GhostFactor","AlphaClose","AlphaClose"],'
+                        '"selection_rationale":"已选择有效因子",'
+                        '"per_factor_reason":{"AlphaClose":"价格因子有效"}}'
+                    )
+                )
+            )
+
+    monkeypatch.setitem(__import__("sys").modules, "openai", SimpleNamespace(OpenAI=FakeClient))
+
+    result = service._select_factors_with_llm(
+        prompt="LLM PROMPT",
+        max_factor_count=3,
+        candidates=[
+            {"name": "AlphaClose", "code": "close"},
+            {"name": "AlphaVolume", "code": "volume"},
+        ],
+        llm_config={"api_key": "test-key", "model": "deepseek-chat", "base_url": "https://example.com/v1"},
+    )
+
+    assert result["selected_factors"] == ["AlphaClose"]
+    assert result["per_factor_reason"] == {"AlphaClose": "价格因子有效"}
 
 
 def test_write_candidate_report_uses_reference_generator(monkeypatch, tmp_path) -> None:

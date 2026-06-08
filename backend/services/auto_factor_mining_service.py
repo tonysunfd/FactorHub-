@@ -24,6 +24,10 @@ from backend.services.factor_evaluation_service import FactorEvaluationService
 from backend.services.factor_generator_service import factor_generator_service
 from backend.services.quantgpt_expression_engine import QuantGPTExpressionEngine
 from backend.services.research_tools.diagnosis_service import diagnosis_service
+from backend.services.research_tools.factor_selection_service import (
+    build_llm_factor_selector_prompt,
+    factor_selection_service,
+)
 from backend.services.research_tools.schemas import ResearchToolBaseRequest
 from backend.services.research_tools.validation_service import validation_service
 from backend.services.report_service import generate_report
@@ -42,6 +46,16 @@ _LLM_SYSTEM_PROMPT = """你是一个量化因子表达式生成器。
 3. 优先生成可解释、可执行、具有多样性的复合因子表达式，不要只改一个窗口参数。
 4. 避免与已存在候选重复；优先提升 rankIC、L/S Sharpe、收益稳定性和 WQ Fitness。
 5. 不要输出解释、Markdown、注释或额外字段。
+"""
+
+_FACTOR_SELECTOR_SYSTEM_PROMPT = """你是一个量化研究员。
+
+你必须遵守以下规则：
+1. 只允许从给定候选列表中选择基础因子。
+2. 只返回 JSON 对象，不要输出 Markdown、解释性前缀或额外文本。
+3. 输出字段必须包含 selected_factors、selection_rationale、per_factor_reason。
+4. selected_factors 中的名字必须与候选列表完全一致。
+5. 优先保证因子语义互补、与目标匹配，并符合场景可计算性约束。
 """
 
 
@@ -115,69 +129,120 @@ class AutoFactorMiningService:
         max_factor_count: int = 12,
         candidate_limit: int = 80,
         selection_mode: str = "auto",
+        direction: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        universe: str | None = None,
+        benchmark: str | None = None,
         extra_context: str | None = None,
         exclude_factors: list[str] | None = None,
     ) -> dict[str, Any]:
-        db = get_db_session()
-        try:
-            repo = FactorRepository(db)
-            factors = repo.get_all(active_only=True)
-        finally:
-            db.close()
-
-        if not factors:
+        candidates = factor_selection_service.load_factor_candidates_for_llm(
+            limit=max(int(candidate_limit or 0), 1),
+            selection_mode=selection_mode,
+        )
+        if not candidates:
             return {
                 "selected_factors": [],
                 "selection_rationale": "当前因子库为空，无法筛选基础因子。",
                 "per_factor_reason": {},
             }
 
-        exclude = {name for name in (exclude_factors or []) if name}
-        combined_prompt = " ".join(item for item in [prompt, extra_context or ""] if item).strip()
-        prompt_tokens = set(_tokenize_text(combined_prompt))
-        scored_items: list[tuple[float, Any, str]] = []
-        for factor in factors[: max(candidate_limit, 1)]:
-            if factor.name in exclude:
-                continue
+        exclude = {str(name).strip() for name in (exclude_factors or []) if str(name or "").strip()}
+        filtered_candidates = [item for item in candidates if item.get("name") not in exclude]
+        if not filtered_candidates:
+            return {
+                "selected_factors": [],
+                "selection_rationale": "候选因子已被排除列表过滤完毕，无法继续筛选。",
+                "per_factor_reason": {},
+            }
 
-            searchable = " ".join(
-                [
-                    factor.name or "",
-                    factor.description or "",
-                    factor.category or "",
-                    factor.code or "",
-                ]
-            ).lower()
-            overlap = [token for token in prompt_tokens if token and token in searchable]
-            score = float(len(overlap))
+        llm_config = llm_config_service.get_runtime_config()
+        if not llm_config.get("api_key"):
+            raise ValueError("LLM 未配置 API Key，无法执行真实因子筛选。")
 
-            if selection_mode == "manual_genetic" and factor.source == "preset":
-                score += 0.25
-            if any(keyword in searchable for keyword in ("close", "volume", "amount", "rsi", "macd", "sma")):
-                score += 0.1
-            if extra_context and any(keyword in searchable for keyword in ("volatility", "std", "atr", "drawdown", "风险", "波动")):
-                score += 0.05
-            if factor.category and factor.category.lower() in combined_prompt.lower():
-                score += 0.2
-
-            reason = (
-                f"命中提示词：{', '.join(overlap[:4])}" if overlap else "作为默认量价/技术因子候选补充进入候选池"
-            )
-            scored_items.append((score, factor, reason))
-
-        scored_items.sort(key=lambda item: (-item[0], item[1].name))
-        selected = scored_items[: max(max_factor_count, 1)]
-        selected_names = [factor.name for _, factor, _ in selected]
-        per_factor_reason = {factor.name: reason for _, factor, reason in selected}
-        rationale = (
-            f"基于提示词与因子名称、描述、分类的匹配度，从前 {min(candidate_limit, len(factors))} 个候选中筛选出 "
-            f"{len(selected_names)} 个基础因子。"
-        )
+        payload = type(
+            "FactorSelectionRequest",
+            (),
+            {
+                "prompt": prompt,
+                "direction": direction or "score",
+                "start_date": start_date or "",
+                "end_date": end_date or "",
+                "universe": universe or "",
+                "benchmark": benchmark or "",
+                "max_factor_count": max_factor_count,
+                "selection_mode": selection_mode,
+            },
+        )()
+        llm_prompt = build_llm_factor_selector_prompt(payload, filtered_candidates)
         if extra_context:
-            rationale += " 已结合上一轮诊断补充筛选偏好。"
+            llm_prompt = f"{llm_prompt}\n\n补充上下文：\n{extra_context.strip()}"
+
+        llm_result = self._select_factors_with_llm(
+            prompt=llm_prompt,
+            max_factor_count=max_factor_count,
+            candidates=filtered_candidates,
+            llm_config=llm_config,
+        )
+        selected_names = llm_result["selected_factors"]
         return {
             "selected_factors": selected_names,
-            "selection_rationale": rationale,
+            "selection_rationale": llm_result["selection_rationale"],
+            "per_factor_reason": llm_result["per_factor_reason"],
+        }
+
+    def _select_factors_with_llm(
+        self,
+        *,
+        prompt: str,
+        max_factor_count: int,
+        candidates: list[dict[str, Any]],
+        llm_config: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            from openai import OpenAI
+        except ImportError as exc:
+            raise RuntimeError("openai SDK 未安装，无法执行真实因子筛选。") from exc
+
+        client = OpenAI(
+            api_key=llm_config["api_key"],
+            base_url=llm_config.get("base_url") or "https://api.deepseek.com/v1",
+        )
+        response = client.chat.completions.create(
+            model=llm_config.get("model") or "deepseek-chat",
+            messages=[
+                {"role": "system", "content": _FACTOR_SELECTOR_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+            max_tokens=1800,
+        )
+        content = (response.choices[0].message.content or "").strip()
+        content = content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        try:
+            parsed = json.loads(content)
+        except Exception as exc:
+            raise ValueError(f"LLM 因子筛选返回了无法解析的 JSON：{content[:200]}") from exc
+
+        if not isinstance(parsed, dict):
+            raise ValueError("LLM 因子筛选返回格式错误，期望 JSON 对象。")
+
+        candidate_name_map = {str(item.get('name')): item for item in candidates if item.get("name")}
+        selected_names = factor_selection_service.dedupe_factor_names(parsed.get("selected_factors") or [])
+        selected_names = [name for name in selected_names if name in candidate_name_map][: max(int(max_factor_count or 0), 1)]
+        if not selected_names:
+            raise ValueError("LLM 未返回任何有效候选因子，请检查提示词或模型输出。")
+
+        raw_reason_map = parsed.get("per_factor_reason") if isinstance(parsed.get("per_factor_reason"), dict) else {}
+        per_factor_reason = {
+            name: str(raw_reason_map.get(name) or "LLM 认为该因子与当前研究目标匹配。").strip()
+            for name in selected_names
+        }
+        selection_rationale = str(parsed.get("selection_rationale") or "").strip() or "LLM 已根据研究目标完成基础因子筛选。"
+        return {
+            "selected_factors": selected_names,
+            "selection_rationale": selection_rationale,
             "per_factor_reason": per_factor_reason,
         }
 

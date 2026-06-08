@@ -771,6 +771,11 @@ async def select_auto_mining_factors(request: AutoMiningFactorSelectionRequest):
             max_factor_count=request.max_factor_count,
             candidate_limit=request.candidate_limit,
             selection_mode=request.selection_mode,
+            direction=request.direction,
+            start_date=request.start_date,
+            end_date=request.end_date,
+            universe=request.universe,
+            benchmark=request.benchmark,
         )
         return {
             "success": True,
