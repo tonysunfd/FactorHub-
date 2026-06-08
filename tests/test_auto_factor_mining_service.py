@@ -322,6 +322,19 @@ def test_evaluate_expression_prefers_quantgpt_panel_execution(monkeypatch) -> No
         lambda **kwargs: panel_df.copy(),
     )
     monkeypatch.setattr(
+        service,
+        "_validate_candidate_expression",
+        lambda **kwargs: {
+            "success": True,
+            "valid": True,
+            "message": "OK",
+            "raw": {
+                "input_expression": kwargs["expression"],
+                "adapted_expression": "rank(close)",
+            },
+        },
+    )
+    monkeypatch.setattr(
         service._quantgpt_engine,
         "execute_on_panel",
         lambda panel, expression: SimpleNamespace(
@@ -365,11 +378,28 @@ def test_evaluate_expression_prefers_quantgpt_panel_execution(monkeypatch) -> No
     assert result.dialect == "quantgpt_local"
     assert result.canonical_expression == "rank(close)"
     assert result.execution_meta["panel_rows"] == len(panel_df)
+    assert result.execution_meta["research_tools"]["validation"]["valid"] is True
 
 
 def test_evaluate_expression_returns_none_when_quantgpt_fails(monkeypatch) -> None:
     service = AutoFactorMiningService()
 
+    monkeypatch.setattr(
+        service,
+        "_validate_candidate_expression",
+        lambda **kwargs: {"success": True, "valid": True, "message": "OK", "raw": {}},
+    )
+    monkeypatch.setattr(
+        service,
+        "_diagnose_candidate_failure",
+        lambda **kwargs: {
+            "success": True,
+            "report": "表达式需要替换字段",
+            "key_findings": ["字段不支持"],
+            "improvement_suggestions": ["改用 close"],
+            "raw": {},
+        },
+    )
     monkeypatch.setattr(
         service._quantgpt_engine,
         "build_panel_data",
@@ -397,6 +427,22 @@ def test_evaluate_expression_returns_none_when_quantgpt_panel_is_empty(monkeypat
     service = AutoFactorMiningService()
 
     monkeypatch.setattr(
+        service,
+        "_validate_candidate_expression",
+        lambda **kwargs: {"success": True, "valid": True, "message": "OK", "raw": {}},
+    )
+    monkeypatch.setattr(
+        service,
+        "_diagnose_candidate_failure",
+        lambda **kwargs: {
+            "success": True,
+            "report": "panel 为空",
+            "key_findings": ["无有效 panel"],
+            "improvement_suggestions": ["调整 universe"],
+            "raw": {},
+        },
+    )
+    monkeypatch.setattr(
         service._quantgpt_engine,
         "build_panel_data",
         lambda **kwargs: pd.DataFrame(),
@@ -405,6 +451,42 @@ def test_evaluate_expression_returns_none_when_quantgpt_panel_is_empty(monkeypat
     result = service.evaluate_expression(
         expression="close",
         prompt="test empty panel invalid",
+        stock_codes=["S001"],
+        start_date="2024-01-01",
+        end_date="2024-01-31",
+        benchmark="hs300",
+        n_groups=2,
+        holding_period=1,
+        direction="score",
+        neutralize_industry=False,
+        neutralize_cap=False,
+    )
+
+    assert result is None
+
+
+def test_evaluate_expression_returns_none_when_quantgpt_validation_fails(monkeypatch) -> None:
+    service = AutoFactorMiningService()
+
+    monkeypatch.setattr(
+        service,
+        "_validate_candidate_expression",
+        lambda **kwargs: {
+            "success": True,
+            "valid": False,
+            "message": "syntax error",
+            "raw": {"adapted_expression": "bad(expr)"},
+        },
+    )
+    monkeypatch.setattr(
+        service._quantgpt_engine,
+        "build_panel_data",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("validation fail should short-circuit")),
+    )
+
+    result = service.evaluate_expression(
+        expression="bad(expr)",
+        prompt="test validation fail",
         stock_codes=["S001"],
         start_date="2024-01-01",
         end_date="2024-01-31",

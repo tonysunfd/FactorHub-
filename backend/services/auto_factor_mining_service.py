@@ -3,6 +3,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -10,6 +11,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
@@ -21,6 +23,9 @@ from backend.services.expression_schema import FactorEvaluationResult
 from backend.services.factor_evaluation_service import FactorEvaluationService
 from backend.services.factor_generator_service import factor_generator_service
 from backend.services.quantgpt_expression_engine import QuantGPTExpressionEngine
+from backend.services.research_tools.diagnosis_service import diagnosis_service
+from backend.services.research_tools.schemas import ResearchToolBaseRequest
+from backend.services.research_tools.validation_service import validation_service
 from backend.services.report_service import generate_report
 from backend.services.llm_config_service import llm_config_service
 
@@ -496,6 +501,123 @@ class AutoFactorMiningService:
             seen.add(key)
             expressions.append(expression)
         return expressions
+
+    def _run_async_tool(self, coro: Any) -> Any:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(asyncio.run, coro)
+            return future.result()
+
+    def _build_research_tool_request(
+        self,
+        *,
+        expression: str,
+        start_date: str,
+        end_date: str,
+        benchmark: str,
+        n_groups: int,
+        holding_period: int,
+        neutralize_industry: bool,
+        neutralize_cap: bool,
+        universe: str = "hs300",
+    ) -> ResearchToolBaseRequest:
+        return ResearchToolBaseRequest(
+            expression=expression,
+            universe=universe,
+            start_date=start_date,
+            end_date=end_date,
+            n_groups=n_groups,
+            holding_period=holding_period,
+            benchmark=benchmark,
+            neutralize_industry=neutralize_industry,
+            neutralize_cap=neutralize_cap,
+        )
+
+    def _validate_candidate_expression(
+        self,
+        *,
+        expression: str,
+        start_date: str,
+        end_date: str,
+        benchmark: str,
+        n_groups: int,
+        holding_period: int,
+        neutralize_industry: bool,
+        neutralize_cap: bool,
+        universe: str = "hs300",
+    ) -> dict[str, Any] | None:
+        try:
+            response = self._run_async_tool(
+                validation_service.validate_expression(expression, "local")
+            )
+        except Exception as exc:
+            logger.warning("QuantGPT validation 调用失败，将继续本地评估 %s：%s", expression, exc)
+            return {
+                "success": False,
+                "valid": True,
+                "message": f"validation 调用失败，降级继续本地评估：{exc}",
+                "raw": {
+                    "input_expression": expression,
+                    "degraded_to_local_execution": True,
+                },
+            }
+
+        return {
+            "success": bool(getattr(response, "success", False)),
+            "valid": bool(getattr(response, "valid", False)),
+            "message": getattr(response, "message", ""),
+            "raw": getattr(response, "raw", None) or {},
+        }
+
+    def _diagnose_candidate_failure(
+        self,
+        *,
+        expression: str,
+        start_date: str,
+        end_date: str,
+        benchmark: str,
+        n_groups: int,
+        holding_period: int,
+        neutralize_industry: bool,
+        neutralize_cap: bool,
+        universe: str = "hs300",
+    ) -> dict[str, Any] | None:
+        request = self._build_research_tool_request(
+            expression=expression,
+            universe=universe,
+            start_date=start_date,
+            end_date=end_date,
+            benchmark=benchmark,
+            n_groups=n_groups,
+            holding_period=holding_period,
+            neutralize_industry=neutralize_industry,
+            neutralize_cap=neutralize_cap,
+        )
+        try:
+            response = self._run_async_tool(diagnosis_service.diagnose_factor(request))
+        except Exception as exc:
+            logger.warning("QuantGPT diagnosis 调用失败 %s：%s", expression, exc)
+            return {
+                "success": False,
+                "error": str(exc),
+                "report": None,
+                "key_findings": [],
+                "improvement_suggestions": [],
+                "raw": {"input_expression": expression},
+            }
+
+        return {
+            "success": bool(getattr(response, "success", False)),
+            "error": getattr(response, "error", None),
+            "report": getattr(response, "report", None),
+            "key_findings": getattr(response, "key_findings", None) or [],
+            "improvement_suggestions": getattr(response, "improvement_suggestions", None) or [],
+            "raw": getattr(response, "raw", None) or {},
+        }
 
     def run_auto_mining(
         self,
@@ -996,7 +1118,24 @@ class AutoFactorMiningService:
         neutralize_industry: bool,
         neutralize_cap: bool,
     ) -> FactorEvaluationResult | None:
-        del neutralize_industry, neutralize_cap
+        validation_result = self._validate_candidate_expression(
+            expression=expression,
+            start_date=start_date,
+            end_date=end_date,
+            benchmark=benchmark,
+            n_groups=n_groups,
+            holding_period=holding_period,
+            neutralize_industry=neutralize_industry,
+            neutralize_cap=neutralize_cap,
+        )
+        if validation_result and not validation_result.get("valid", False):
+            logger.info(
+                "QuantGPT validation 未通过，候选失效 %s：%s",
+                expression,
+                validation_result.get("message") or "unknown validation failure",
+            )
+            return None
+
         try:
             panel_df = self._quantgpt_engine.build_panel_data(
                 stock_codes=stock_codes,
@@ -1032,12 +1171,40 @@ class AutoFactorMiningService:
                 metrics_source=execution.metrics_source,
             )
             if panel_result is not None:
+                panel_result.execution_meta.setdefault("research_tools", {})
+                if validation_result is not None:
+                    panel_result.execution_meta["research_tools"]["validation"] = validation_result
                 return panel_result
 
+            diagnosis_result = self._diagnose_candidate_failure(
+                expression=expression,
+                start_date=start_date,
+                end_date=end_date,
+                benchmark=benchmark,
+                n_groups=n_groups,
+                holding_period=holding_period,
+                neutralize_industry=neutralize_industry,
+                neutralize_cap=neutralize_cap,
+            )
             logger.info("QuantGPT 面板评估未产出有效结果，候选失效：%s", expression)
+            if diagnosis_result and diagnosis_result.get("success"):
+                logger.info("QuantGPT diagnosis %s：%s", expression, diagnosis_result.get("report"))
             return None
         except Exception as exc:
-            logger.warning("QuantGPT 执行器评估失败，候选失效 %s：%s", expression, exc)
+            diagnosis_result = self._diagnose_candidate_failure(
+                expression=expression,
+                start_date=start_date,
+                end_date=end_date,
+                benchmark=benchmark,
+                n_groups=n_groups,
+                holding_period=holding_period,
+                neutralize_industry=neutralize_industry,
+                neutralize_cap=neutralize_cap,
+            )
+            diagnosis_hint = ""
+            if diagnosis_result and diagnosis_result.get("success"):
+                diagnosis_hint = f"，diagnosis={diagnosis_result.get('report')}"
+            logger.warning("QuantGPT 执行器评估失败，候选失效 %s：%s%s", expression, exc, diagnosis_hint)
             return None
 
     def _build_round_evaluation(
@@ -1062,6 +1229,7 @@ class AutoFactorMiningService:
         weaknesses = list(best_evaluation.interpretation.get("weaknesses") or [])
         primary_problem = weaknesses[0] if weaknesses else "暂无"
         suggested_actions = list(best_evaluation.interpretation.get("next_steps") or [])
+        research_tools = (getattr(best_evaluation, "execution_meta", {}) or {}).get("research_tools", {})
         return {
             "prompt": prompt,
             "base_factors": list(base_factors),
@@ -1069,6 +1237,7 @@ class AutoFactorMiningService:
             "recommended_goal": direction,
             "suggested_actions": suggested_actions,
             "metric_snapshot": metric_snapshot,
+            "research_tools": research_tools,
         }
 
     def _load_benchmark_returns(
