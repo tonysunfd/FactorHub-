@@ -17,6 +17,12 @@ from pydantic import BaseModel
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 from backend.services.auto_factor_mining_service import auto_factor_mining_service
+from backend.services.rdagent_factor_mining_service import (
+    MAX_RDAGENT_ITERATIONS,
+    RDAgentFactorMiningService,
+    RDAgentMiningConfig,
+    RDAgentTaskCancelled,
+)
 from backend.api.routers.mining_progress import (
     build_auto_campaign_status,
     build_mining_status_payload,
@@ -24,6 +30,11 @@ from backend.api.routers.mining_progress import (
     normalize_fitness_history,
     update_task_from_candidates,
     update_task_progress,
+)
+from backend.services.research_tools.factor_selection_service import (
+    build_factor_snapshot_summary,
+    load_factor_candidates_for_llm,
+    normalize_factor_expression_key,
 )
 
 router = APIRouter()
@@ -108,7 +119,60 @@ class ContinueAutoMiningRequest(BaseModel):
     neutralize_cap: Optional[bool] = True
 
 
+class RDAgentBootstrapSelectRequest(BaseModel):
+    objective: str
+    direction: Optional[str] = "score"
+    start_date: str
+    end_date: str
+    universe: str
+    benchmark: str
+    max_factor_count: int = 8
+    max_candidate_field_count: int = 5
+    candidate_limit: int = 80
+
+
+class RDAgentAcceptancePolicy(BaseModel):
+    max_correlation_with_sota: float = 0.99
+    min_rank_ic: float = 0.0
+    min_annualized_return_delta: float = 0.0
+    max_drawdown_regression: float = 0.05
+    min_valid_coverage: float = 0.8
+
+
+class RDAgentMiningRequest(BaseModel):
+    objective: str
+    candidate_universe: list[str]
+    base_factors: list[str] = []
+    start_date: str
+    end_date: str
+    universe: str
+    benchmark: str
+    max_iterations: int = 3
+    candidates_per_iteration: int = 3
+    n_groups: int = 5
+    holding_period: int = 5
+    direction: Optional[str] = "score"
+    neutralize_industry: bool = True
+    neutralize_cap: bool = True
+    sota_library_id: Optional[str] = None
+    continuation_of: Optional[str] = None
+    previous_feedback_id: Optional[str] = None
+    previous_expressions: list[str] = []
+    acceptance_policy: RDAgentAcceptancePolicy = RDAgentAcceptancePolicy()
+
+
 mining_tasks: dict[str, dict[str, Any]] = {}
+rdagent_tasks: dict[str, dict[str, Any]] = {}
+RDAGENT_ALLOWED_CANDIDATE_FIELDS = [
+    "close",
+    "open",
+    "high",
+    "low",
+    "volume",
+    "amount",
+    "vwap",
+    "pct_change",
+]
 
 
 def _safe_candidate_score(candidate: dict[str, Any]) -> float:
@@ -181,6 +245,391 @@ def _build_mining_status_payload(task_id: str, task: dict[str, Any]) -> dict[str
 
 def _build_auto_campaign_status(task_id: str, task: dict[str, Any]) -> dict[str, Any]:
     return build_auto_campaign_status(task_id, task)
+
+
+def _normalize_rdagent_field_list(fields: list[str], max_count: int) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in fields:
+        field_name = str(value or "").strip()
+        if field_name not in RDAGENT_ALLOWED_CANDIDATE_FIELDS or field_name in seen:
+            continue
+        seen.add(field_name)
+        normalized.append(field_name)
+        if len(normalized) >= max(max_count, 1):
+            break
+    return normalized
+
+
+def _normalize_rdagent_factor_list(factors: list[str], max_count: int) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in factors:
+        factor_name = str(value or "").strip()
+        if not factor_name or factor_name in seen:
+            continue
+        seen.add(factor_name)
+        normalized.append(factor_name)
+        if len(normalized) >= max(max_count, 1):
+            break
+    return normalized
+
+
+def _build_rdagent_status_payload(task_id: str, task: dict[str, Any]) -> dict[str, Any]:
+    payload = build_auto_campaign_status(task_id, task)
+    payload["cancel_requested"] = bool(task.get("cancel_requested"))
+    return payload
+
+
+def _build_task_list_item(task_id: str, task: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "task_id": task_id,
+        "kind": task.get("kind"),
+        "status": task.get("status"),
+        "progress": task.get("progress", 0),
+        "created_at": task.get("created_at"),
+        "updated_at": task.get("updated_at", task.get("created_at")),
+        "request": task.get("request") or {},
+    }
+
+
+def _raise_if_rdagent_task_cancel_requested(task_id: str) -> None:
+    task = rdagent_tasks.get(task_id)
+    if not task:
+        return
+    if task.get("cancel_requested") or task.get("status") == "cancelled":
+        raise RDAgentTaskCancelled(f"RDAgent 任务 {task_id} 已终止")
+
+
+class _LocalRDAgentBackend:
+    def propose_hypothesis(self, *, config: RDAgentMiningConfig, rounds: list[dict[str, Any]], iteration: int) -> dict[str, Any]:
+        previous_round = rounds[-1] if rounds else None
+        target_goal = config.direction or "score"
+        if previous_round and previous_round.get("feedback", {}).get("next_goal"):
+            target_goal = previous_round["feedback"]["next_goal"]
+        return {
+            "summary": f"第 {iteration} 轮围绕 {target_goal} 优化 {config.objective}",
+            "target_goal": target_goal,
+            "objective": config.objective,
+            "base_factors": list(config.base_factors),
+            "candidate_universe": list(config.candidate_universe),
+            "previous_feedback_id": config.previous_feedback_id,
+        }
+
+    def hypothesis_to_experiment(
+        self,
+        *,
+        config: RDAgentMiningConfig,
+        hypothesis: dict[str, Any],
+        rounds: list[dict[str, Any]],
+        iteration: int,
+    ) -> dict[str, Any]:
+        return {
+            "round_index": iteration,
+            "candidate_limit": max(int(config.candidates_per_iteration or 1), 1),
+            "base_factors": list(config.base_factors),
+            "candidate_universe": list(config.candidate_universe),
+            "hypothesis": hypothesis,
+        }
+
+    def code_experiment(
+        self,
+        *,
+        config: RDAgentMiningConfig,
+        experiment: dict[str, Any],
+        hypothesis: dict[str, Any],
+        rounds: list[dict[str, Any]],
+        iteration: int,
+    ) -> dict[str, Any]:
+        current_base_factors = list(config.base_factors)
+        if not current_base_factors:
+            selection = auto_factor_mining_service.select_factors(
+                prompt=config.objective,
+                max_factor_count=max(int(config.candidates_per_iteration or 1), 1),
+                candidate_limit=40,
+                selection_mode="auto",
+            )
+            current_base_factors = selection.get("selected_factors", [])
+        return {
+            "round_index": iteration,
+            "base_factors": current_base_factors,
+            "candidate_universe": list(config.candidate_universe),
+            "experiment": experiment,
+            "hypothesis": hypothesis,
+        }
+
+    def run_experiment(
+        self,
+        *,
+        config: RDAgentMiningConfig,
+        coded_experiment: dict[str, Any],
+        hypothesis: dict[str, Any],
+        rounds: list[dict[str, Any]],
+        iteration: int,
+    ) -> dict[str, Any]:
+        current_base_factors = list(coded_experiment.get("base_factors") or config.base_factors)
+        previous_expressions = list(config.previous_expressions or [])
+        for round_item in rounds:
+            for candidate in round_item.get("candidates") or []:
+                expression = str(candidate.get("expression") or "").strip()
+                if expression:
+                    previous_expressions.append(expression)
+
+        auto_result = auto_factor_mining_service.run_auto_mining(
+            prompt=config.objective,
+            base_factors=current_base_factors,
+            start_date=config.start_date,
+            end_date=config.end_date,
+            universe=config.universe,
+            benchmark=config.benchmark,
+            n_groups=config.n_groups,
+            holding_period=config.holding_period,
+            n_candidates=max(int(config.candidates_per_iteration or 1), 1),
+            direction=config.direction,
+            neutralize_industry=config.neutralize_industry,
+            neutralize_cap=config.neutralize_cap,
+            previous_expressions=previous_expressions,
+            continuation_context={
+                "primary_problem": hypothesis.get("summary"),
+                "recommended_goal": hypothesis.get("target_goal"),
+            },
+        )
+        candidates = []
+        for index, factor in enumerate(auto_result.get("factors", [])):
+            factor_copy = dict(factor)
+            score = float(factor_copy.get("score", 0.0) or 0.0)
+            factor_copy["candidate_id"] = f"{config.task_id}-round-{iteration}-candidate-{index + 1}"
+            factor_copy["status"] = "accepted" if index == 0 else "watchlist"
+            factor_copy["automation_meta"] = {
+                **(factor_copy.get("automation_meta") or {}),
+                "round_index": iteration,
+                "round_task_id": f"{config.task_id}-round-{iteration}",
+                "source": "rdagent",
+            }
+            task_details = dict(factor_copy.get("task_details") or {})
+            task_details["rdagent"] = {
+                **(task_details.get("rdagent") or {}),
+                "candidate_score": {
+                    "score": score,
+                    "report_metrics": factor_copy.get("report_metrics") or {},
+                    "backtest_summary": factor_copy.get("backtest_summary") or {},
+                    "report_url": factor_copy.get("report_url"),
+                },
+                "hypothesis": hypothesis,
+            }
+            factor_copy["task_details"] = task_details
+            factor_copy["quantgpt_task_details"] = task_details
+            candidates.append(factor_copy)
+
+        metrics = {
+            "score": float(auto_result.get("best_score", 0.0) or 0.0),
+            "avg_score": float(auto_result.get("avg_score", 0.0) or 0.0),
+        }
+        best_factor = candidates[0] if candidates else {}
+        return {
+            "candidates": candidates,
+            "metrics": metrics,
+            "report_ref": best_factor.get("report_url"),
+            "backtest_engine": "factorhub_auto_mining",
+            "raw_result": auto_result,
+        }
+
+    def generate_feedback(
+        self,
+        *,
+        config: RDAgentMiningConfig,
+        hypothesis: dict[str, Any],
+        experiment: dict[str, Any],
+        run_result: dict[str, Any],
+        rounds: list[dict[str, Any]],
+        iteration: int,
+    ) -> dict[str, Any]:
+        metrics = run_result.get("metrics") or {}
+        score = float(metrics.get("score", 0.0) or 0.0)
+        target_goal = config.direction or "score"
+        if score < 60:
+            next_goal = "ls_sharpe" if target_goal == "score" else target_goal
+            reason = "当前综合表现一般，下一轮优先提升稳定性和 Sharpe。"
+        else:
+            next_goal = target_goal
+            reason = "当前结果可继续沿既定方向做小步优化。"
+        return {
+            "summary": reason,
+            "next_goal": next_goal,
+            "score": score,
+            "iteration": iteration,
+        }
+
+
+def _build_rdagent_round_from_service(round_item: dict[str, Any], task_id: str) -> dict[str, Any]:
+    evaluation = round_item.get("evaluation") or {}
+    feedback = round_item.get("feedback") or {}
+    hypothesis = round_item.get("hypothesis") or {}
+    experiment = round_item.get("experiment") or {}
+    candidates = list(round_item.get("candidates") or round_item.get("all_factors") or [])
+    return {
+        "round_index": round_item.get("round_index", 0),
+        "task_id": f"{task_id}-round-{round_item.get('round_index', 0)}",
+        "best_score": evaluation.get("best_score", 0.0),
+        "avg_score": evaluation.get("avg_score", 0.0),
+        "input_base_factors": list(experiment.get("base_factors") or hypothesis.get("base_factors") or []),
+        "selected_factors": list(experiment.get("base_factors") or hypothesis.get("base_factors") or []),
+        "factor_update_mode": "append",
+        "continuation_hypothesis": {
+            "hypothesis": hypothesis.get("summary"),
+            "target_goal": hypothesis.get("target_goal"),
+            "candidate_factors": list(experiment.get("base_factors") or []),
+        },
+        "continuation_feedback": {
+            "reason": feedback.get("summary"),
+            "next_goal": feedback.get("next_goal"),
+            "decision": True,
+        },
+        "retained_count": len([candidate for candidate in candidates if candidate.get("status") == "accepted"]),
+        "retained_factors": [candidate for candidate in candidates if candidate.get("status") == "accepted"],
+        "candidates": candidates,
+        "all_factors": candidates,
+        "manual_report": {
+            "summary": feedback.get("summary"),
+            "score": feedback.get("score"),
+        },
+        "continue_mining_request": {
+            "objective": hypothesis.get("objective"),
+            "candidate_universe": list(hypothesis.get("candidate_universe") or []),
+            "base_factors": list(experiment.get("base_factors") or []),
+            "continuation_of": task_id,
+            "previous_feedback_id": f"{task_id}-feedback-{round_item.get('round_index', 0)}",
+        },
+        "final_round_evaluation": {
+            "recommended_goal": feedback.get("next_goal"),
+            "primary_problem": feedback.get("summary"),
+            "metric_snapshot": evaluation.get("metrics") or {},
+        },
+    }
+
+
+async def _run_rdagent_mining(task_id: str, request: RDAgentMiningRequest) -> None:
+    task = rdagent_tasks[task_id]
+    try:
+        task["status"] = "running"
+        task["progress"] = 5
+        task["request"] = request.model_dump()
+        task["total_rounds"] = max(1, min(int(request.max_iterations or 1), MAX_RDAGENT_ITERATIONS))
+        task["upstream_status"] = "rdagent_running"
+        task["candidates"] = []
+        task["rounds"] = []
+
+        config = RDAgentMiningConfig(
+            task_id=task_id,
+            objective=request.objective,
+            max_iterations=request.max_iterations,
+            candidates_per_iteration=request.candidates_per_iteration,
+            base_factors=list(request.base_factors or []),
+            candidate_universe=_normalize_rdagent_field_list(
+                request.candidate_universe,
+                max(len(request.candidate_universe), 1),
+            ),
+            start_date=request.start_date,
+            end_date=request.end_date,
+            universe=request.universe,
+            benchmark=request.benchmark,
+            n_groups=request.n_groups,
+            holding_period=request.holding_period,
+            direction=request.direction,
+            neutralize_industry=request.neutralize_industry,
+            neutralize_cap=request.neutralize_cap,
+            acceptance_policy=request.acceptance_policy.model_dump(),
+            continuation_of=request.continuation_of,
+            previous_feedback_id=request.previous_feedback_id,
+            previous_expressions=list(request.previous_expressions or []),
+            cancel_check=lambda: _raise_if_rdagent_task_cancel_requested(task_id),
+        )
+        service = RDAgentFactorMiningService(_LocalRDAgentBackend())
+
+        def _progress(progress: int, stage: str, event: dict[str, Any]) -> None:
+            iteration = int(event.get("iteration") or 0)
+            payload = event.get("payload") or {}
+            candidates = payload.get("candidates") or task.get("candidates") or []
+            best_fitness = float(payload.get("best_score", payload.get("evaluation", {}).get("best_score", 0.0)) or 0.0)
+            avg_fitness = float(payload.get("avg_score", payload.get("evaluation", {}).get("avg_score", 0.0)) or 0.0)
+            task["upstream_status"] = stage
+            task["current_round"] = max(iteration, task.get("current_round", 0))
+            update_task_progress(
+                task,
+                generation=max(iteration, 1),
+                total_generations=max(task.get("total_rounds", 1), 1),
+                best_fitness=best_fitness,
+                avg_fitness=avg_fitness,
+                progress=progress,
+                candidates=candidates,
+            )
+            if stage == "rdagent_feedback":
+                latest_round = {
+                    "round_index": iteration,
+                    "task_id": f"{task_id}-round-{iteration}",
+                    "candidates": candidates,
+                    "all_factors": candidates,
+                    "best_score": best_fitness,
+                    "avg_score": avg_fitness,
+                    "manual_report": {
+                        "summary": (payload.get("feedback") or {}).get("summary"),
+                        "score": (payload.get("feedback") or {}).get("score"),
+                    },
+                }
+                task["latest_round"] = latest_round
+
+        result = await asyncio.to_thread(
+            service.run,
+            task_id=task_id,
+            config=config,
+            on_progress=_progress,
+        )
+
+        rounds = [_build_rdagent_round_from_service(round_item, task_id) for round_item in result.get("rounds", [])]
+        retained_factors = list(result.get("retained_factors") or [])
+        final_round = rounds[-1] if rounds else None
+        final_result = {
+            "task_id": task_id,
+            "objective": request.objective,
+            "rounds": rounds,
+            "retained_factors": retained_factors,
+            "watchlist_factors": list(result.get("watchlist_factors") or []),
+            "fitness_history": normalize_fitness_history(result.get("fitness_history")),
+            "final_round_result": {
+                **(result.get("final_round_result") or {}),
+                "factors": list((result.get("final_round_result") or {}).get("factors") or (final_round or {}).get("candidates") or []),
+            },
+            "manual_report": final_round.get("manual_report") if final_round else None,
+            "continue_mining_request": final_round.get("continue_mining_request") if final_round else None,
+        }
+        finalize_task_result(
+            task,
+            final_result,
+            candidates=retained_factors or (final_round.get("candidates") if final_round else []),
+            generation_key="generations",
+            best_key="best_score",
+            avg_key="avg_score",
+            history_key="fitness_history",
+        )
+        task["current_round"] = len(rounds)
+        task["total_rounds"] = max(task.get("total_rounds", len(rounds)), len(rounds))
+        task["rounds"] = rounds
+        task["latest_round"] = final_round
+        task["retained_count"] = len(retained_factors)
+        task["upstream_status"] = "rdagent_completed"
+        task["updated_at"] = asyncio.get_running_loop().time()
+    except RDAgentTaskCancelled as exc:
+        logger.info("RDAgent task %s cancelled: %s", task_id, exc)
+        task["status"] = "cancelled"
+        task["error"] = str(exc)
+        task["upstream_status"] = "rdagent_cancelled"
+        task["updated_at"] = asyncio.get_running_loop().time()
+    except Exception as exc:
+        logger.error("RDAgent task %s failed: %s", task_id, exc, exc_info=True)
+        task["status"] = "failed"
+        task["error"] = str(exc)
+        task["upstream_status"] = "rdagent_failed"
+        task["updated_at"] = asyncio.get_running_loop().time()
 
 
 async def _run_auto_mining(task_id: str, request: AutoMiningRequest):
@@ -429,6 +878,171 @@ async def select_continue_auto_mining_factors(request: ContinueAutoMiningRequest
         "success": True,
         "data": result,
         "message": f"已重新筛选 {len(result['selected_factors'])} 个基础因子",
+    }
+
+
+@router.post("/rdagent/select-bootstrap")
+async def select_rdagent_bootstrap(request: RDAgentBootstrapSelectRequest):
+    """为 RDAgent 生成候选字段和基础因子。"""
+    try:
+        candidate_pool = load_factor_candidates_for_llm(
+            limit=max(int(request.candidate_limit or 80), 1),
+            selection_mode="auto",
+        )
+        factor_selection = auto_factor_mining_service.select_factors(
+            prompt=request.objective,
+            max_factor_count=max(int(request.max_factor_count or 8), 1),
+            candidate_limit=max(int(request.candidate_limit or 80), 1),
+            selection_mode="auto",
+        )
+        selected_base_factors = _normalize_rdagent_factor_list(
+            factor_selection.get("selected_factors", []),
+            max(int(request.max_factor_count or 8), 1),
+        )
+
+        objective_text = str(request.objective or "").lower()
+        suggested_fields: list[str] = []
+        if any(keyword in objective_text for keyword in ("volume", "成交量", "amount", "量能")):
+            suggested_fields.extend(["volume", "amount"])
+        if any(keyword in objective_text for keyword in ("volatility", "波动", "drawdown", "回撤")):
+            suggested_fields.extend(["high", "low", "close"])
+        if any(keyword in objective_text for keyword in ("trend", "sharpe", "return", "收益")):
+            suggested_fields.extend(["close", "vwap", "pct_change"])
+        suggested_fields.extend(RDAGENT_ALLOWED_CANDIDATE_FIELDS)
+        selected_fields = _normalize_rdagent_field_list(
+            suggested_fields,
+            max(int(request.max_candidate_field_count or 5), 1),
+        )
+
+        factor_reasons = factor_selection.get("per_factor_reason", {})
+        summary_lines = [
+            f"候选字段：{', '.join(selected_fields) if selected_fields else '未选择'}。",
+            f"基础因子：{', '.join(selected_base_factors) if selected_base_factors else '未选择'}。",
+        ]
+        if factor_selection.get("selection_rationale"):
+            summary_lines.append(str(factor_selection["selection_rationale"]))
+        if candidate_pool:
+            top_snapshot = candidate_pool[: min(3, len(candidate_pool))]
+            snapshot_lines = [
+                f"{item.get('name')}：{build_factor_snapshot_summary(item.get('snapshot_summary') or {})}"
+                for item in top_snapshot
+            ]
+            summary_lines.append("候选参考：" + "；".join(snapshot_lines))
+        if factor_reasons:
+            summary_lines.append(
+                "因子理由：" + "；".join(
+                    f"{name}：{reason}" for name, reason in list(factor_reasons.items())[: min(5, len(factor_reasons))]
+                )
+            )
+
+        return {
+            "success": True,
+            "data": {
+                "candidate_universe": selected_fields,
+                "base_factors": selected_base_factors,
+                "selection_rationale": factor_selection.get("selection_rationale", ""),
+                "per_factor_reason": factor_reasons,
+                "summary": "\n".join(summary_lines),
+            },
+            "message": "已生成 RDAgent 启动配置",
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/rdagent")
+async def start_rdagent_mining(request: RDAgentMiningRequest):
+    """启动 RDAgent 因子挖掘。"""
+    try:
+        task_id = str(uuid.uuid4())
+        normalized_fields = _normalize_rdagent_field_list(
+            request.candidate_universe or RDAGENT_ALLOWED_CANDIDATE_FIELDS,
+            max(len(request.candidate_universe or []), 1),
+        ) or RDAGENT_ALLOWED_CANDIDATE_FIELDS[:3]
+        normalized_request = request.model_copy(update={"candidate_universe": normalized_fields})
+        rdagent_tasks[task_id] = {
+            "kind": "rdagent",
+            "status": "pending",
+            "progress": 0,
+            "error": None,
+            "result": None,
+            "request": normalized_request.model_dump(),
+            "created_at": str(asyncio.get_running_loop().time()),
+            "updated_at": str(asyncio.get_running_loop().time()),
+            "current_round": 0,
+            "total_rounds": max(1, min(int(request.max_iterations or 1), MAX_RDAGENT_ITERATIONS)),
+            "retained_count": 0,
+            "upstream_status": "rdagent_pending",
+            "rounds": [],
+            "latest_round": None,
+            "candidates": [],
+            "cancel_requested": False,
+        }
+        asyncio.create_task(_run_rdagent_mining(task_id, normalized_request))
+        return {
+            "success": True,
+            "data": {
+                "task_id": task_id,
+                "status": "pending",
+            },
+            "message": "RDAgent 挖掘任务已启动",
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/rdagent/{task_id}/cancel")
+async def cancel_rdagent_mining(task_id: str):
+    task = rdagent_tasks.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.get("status") in {"completed", "failed", "cancelled"}:
+        return {
+            "success": True,
+            "data": {
+                "task_id": task_id,
+                "status": task.get("status"),
+            },
+            "message": "任务已结束，无需重复终止",
+        }
+    task["cancel_requested"] = True
+    task["updated_at"] = str(asyncio.get_running_loop().time())
+    if task.get("status") == "pending":
+        task["status"] = "cancelled"
+        task["error"] = "任务在启动前已终止"
+        task["upstream_status"] = "rdagent_cancelled"
+    else:
+        task["status"] = "cancelled"
+        task["error"] = "任务已终止"
+        task["upstream_status"] = "rdagent_cancelled"
+    return {
+        "success": True,
+        "data": {
+            "task_id": task_id,
+            "status": task["status"],
+            "cancel_requested": True,
+        },
+        "message": "已终止 RDAgent 任务",
+    }
+
+
+@router.get("/tasks")
+async def list_mining_tasks(kind: Optional[str] = None, limit: int = 20):
+    """返回最近任务，供前端恢复状态。"""
+    normalized_limit = max(int(limit or 20), 1)
+    items: list[dict[str, Any]] = []
+    if kind in (None, "", "genetic", "auto", "auto_campaign", "auto_continue"):
+        for task_id, task in mining_tasks.items():
+            items.append(_build_task_list_item(task_id, task))
+    if kind in (None, "", "rdagent"):
+        for task_id, task in rdagent_tasks.items():
+            items.append(_build_task_list_item(task_id, task))
+    if kind:
+        items = [item for item in items if item.get("kind") == kind]
+    items.sort(key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""), reverse=True)
+    return {
+        "success": True,
+        "data": items[:normalized_limit],
     }
 
 
@@ -712,6 +1326,25 @@ async def get_auto_mining_campaign_results(task_id: str):
     if task_id not in mining_tasks:
         raise HTTPException(status_code=404, detail="任务不存在")
     task = mining_tasks[task_id]
+    if task["status"] != "completed":
+        raise HTTPException(status_code=400, detail=f"任务尚未完成，当前状态: {task['status']}")
+    return {"success": True, "data": task["result"]}
+
+
+@router.get("/rdagent/status/{task_id}")
+async def get_rdagent_mining_status(task_id: str):
+    """获取 RDAgent 挖掘状态。"""
+    if task_id not in rdagent_tasks:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return {"success": True, "data": _build_rdagent_status_payload(task_id, rdagent_tasks[task_id])}
+
+
+@router.get("/rdagent/results/{task_id}")
+async def get_rdagent_mining_results(task_id: str):
+    """获取 RDAgent 挖掘结果。"""
+    if task_id not in rdagent_tasks:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    task = rdagent_tasks[task_id]
     if task["status"] != "completed":
         raise HTTPException(status_code=400, detail=f"任务尚未完成，当前状态: {task['status']}")
     return {"success": True, "data": task["result"]}
