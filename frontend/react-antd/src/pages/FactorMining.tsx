@@ -51,9 +51,11 @@ const { Panel } = Collapse;
 
 const AUTO_MINING_FORM_STORAGE_KEY = "factorhub:auto-mining-form";
 const RDAGENT_ACTIVE_TASK_STORAGE_KEY = "factorhub:rdagent-active-task";
+const MINING_ACTIVE_TASK_STORAGE_KEY = "factorhub:mining-active-task";
 const AUTO_PROGRESS_POLL_MS = 1000;
 const RDAGENT_TERMINAL_STATUSES = ["completed", "failed", "cancelled"] as const;
 const RDAGENT_RESUMABLE_STATUSES = ["pending", "running", "cancelling"] as const;
+const MINING_RESUMABLE_STATUSES = ["pending", "running"] as const;
 const FACTORHUB_MARKET_FIELDS = ["open", "high", "low", "close", "volume", "amount", "vwap", "pct_change"];
 const OPTIMIZATION_DIRECTION_OPTIONS = [
   { label: "优化 Score", value: "score" },
@@ -67,6 +69,7 @@ const OPTIMIZATION_DIRECTION_OPTIONS = [
 
 type MiningMode = "manual" | "auto" | "rdagent";
 type RDAgentBootstrapMode = "manual" | "llm_auto";
+type PersistedMiningTaskKind = "genetic" | "auto" | "auto_campaign" | "auto_continue";
 
 interface Factor {
   id: number;
@@ -254,6 +257,13 @@ interface ContinuationInsightSummary {
 
 interface PersistedRDAgentTaskState {
   taskId: string;
+  status?: string;
+  updatedAt?: string;
+}
+
+interface PersistedMiningTaskState {
+  taskId: string;
+  kind: PersistedMiningTaskKind;
   status?: string;
   updatedAt?: string;
 }
@@ -587,6 +597,26 @@ const loadPersistedRDAgentTaskState = (): PersistedRDAgentTaskState | null => {
   }
 };
 
+const loadPersistedMiningTaskState = (): PersistedMiningTaskState | null => {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(MINING_ACTIVE_TASK_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed?.taskId || typeof parsed.taskId !== "string") return null;
+    if (!parsed?.kind || typeof parsed.kind !== "string") return null;
+    return {
+      taskId: parsed.taskId,
+      kind: parsed.kind as PersistedMiningTaskKind,
+      status: typeof parsed.status === "string" ? parsed.status : undefined,
+      updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : undefined,
+    };
+  } catch (error) {
+    console.warn("读取挖掘后台任务状态失败:", error);
+    return null;
+  }
+};
+
 const persistRDAgentTaskState = (taskId: string, status?: string) => {
   if (typeof window === "undefined" || !taskId) return;
   try {
@@ -612,11 +642,40 @@ const clearPersistedRDAgentTaskState = () => {
   }
 };
 
+const persistMiningTaskState = (taskId: string, kind: PersistedMiningTaskKind, status?: string) => {
+  if (typeof window === "undefined" || !taskId) return;
+  try {
+    window.localStorage.setItem(
+      MINING_ACTIVE_TASK_STORAGE_KEY,
+      JSON.stringify({
+        taskId,
+        kind,
+        status: status || "running",
+        updatedAt: new Date().toISOString(),
+      }),
+    );
+  } catch (error) {
+    console.warn("保存挖掘后台任务状态失败:", error);
+  }
+};
+
+const clearPersistedMiningTaskState = () => {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(MINING_ACTIVE_TASK_STORAGE_KEY);
+  } catch (error) {
+    console.warn("清理挖掘后台任务状态失败:", error);
+  }
+};
+
 const isRDAgentTerminalStatus = (status?: string | null) =>
   RDAGENT_TERMINAL_STATUSES.includes(String(status || "").toLowerCase() as (typeof RDAGENT_TERMINAL_STATUSES)[number]);
 
 const isRDAgentResumableStatus = (status?: string | null) =>
   RDAGENT_RESUMABLE_STATUSES.includes(String(status || "").toLowerCase() as (typeof RDAGENT_RESUMABLE_STATUSES)[number]);
+
+const isMiningResumableStatus = (status?: string | null) =>
+  MINING_RESUMABLE_STATUSES.includes(String(status || "").toLowerCase() as (typeof MINING_RESUMABLE_STATUSES)[number]);
 
 const ResultSection: React.FC<{
   kicker?: string;
@@ -655,6 +714,7 @@ const FactorMining: React.FC = () => {
   const elapsedRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const startTimeRef = useRef<number | null>(null);
   const restoringRDAgentTaskRef = useRef<string | null>(null);
+  const restoringMiningTaskRef = useRef<string | null>(null);
 
   const [activeTab, setActiveTab] = useState<MiningMode>("manual");
   const [factors, setFactors] = useState<Factor[]>([]);
@@ -692,6 +752,9 @@ const FactorMining: React.FC = () => {
   const [autoLaunchMode, setAutoLaunchMode] = useState<"single" | "campaign">("campaign");
   const [persistedRDAgentTaskState, setPersistedRDAgentTaskState] = useState<PersistedRDAgentTaskState | null>(() =>
     loadPersistedRDAgentTaskState()
+  );
+  const [persistedMiningTaskState, setPersistedMiningTaskState] = useState<PersistedMiningTaskState | null>(() =>
+    loadPersistedMiningTaskState()
   );
   const [wqSubmittingKeys, setWqSubmittingKeys] = useState<Record<string, boolean>>({});
   const [wqSyncingKeys, setWqSyncingKeys] = useState<Record<string, boolean>>({});
@@ -799,6 +862,21 @@ const FactorMining: React.FC = () => {
     setPersistedRDAgentTaskState(null);
   };
 
+  const syncPersistedMiningTaskState = (taskId: string, kind: PersistedMiningTaskKind, status?: string) => {
+    persistMiningTaskState(taskId, kind, status);
+    setPersistedMiningTaskState({
+      taskId,
+      kind,
+      status: status || "running",
+      updatedAt: new Date().toISOString(),
+    });
+  };
+
+  const clearPersistedMiningTaskStateAndBanner = () => {
+    clearPersistedMiningTaskState();
+    setPersistedMiningTaskState(null);
+  };
+
   useEffect(() => {
     const handleResize = () => setIsMobileView(window.innerWidth <= 768);
     if (typeof window !== "undefined") {
@@ -902,6 +980,14 @@ const FactorMining: React.FC = () => {
       clearPersistedRDAgentTaskStateAndBanner();
     }
 
+    const persistedMiningTask = loadPersistedMiningTaskState();
+    if (persistedMiningTask?.taskId && isMiningResumableStatus(persistedMiningTask.status)) {
+      setPersistedMiningTaskState(persistedMiningTask);
+      void restoreMiningTask(persistedMiningTask, true);
+    } else if (persistedMiningTask?.taskId) {
+      clearPersistedMiningTaskStateAndBanner();
+    }
+
     return () => {
       if (typeof window !== "undefined") {
         window.removeEventListener("resize", handleResize);
@@ -941,6 +1027,34 @@ const FactorMining: React.FC = () => {
       window.removeEventListener("focus", maybeReconnect);
     };
   }, [activeTab, mining]);
+
+  useEffect(() => {
+    if (typeof document === "undefined" || typeof window === "undefined") {
+      return;
+    }
+
+    const maybeReconnect = () => {
+      if (document.visibilityState !== "visible") return;
+      const latestPersisted = loadPersistedMiningTaskState();
+      if (!latestPersisted?.taskId) return;
+      if (!isMiningResumableStatus(latestPersisted.status)) {
+        clearPersistedMiningTaskStateAndBanner();
+        return;
+      }
+      setPersistedMiningTaskState(latestPersisted);
+      if (mining) return;
+      if (restoringMiningTaskRef.current === latestPersisted.taskId) return;
+      void restoreMiningTask(latestPersisted, true);
+    };
+
+    document.addEventListener("visibilitychange", maybeReconnect);
+    window.addEventListener("focus", maybeReconnect);
+
+    return () => {
+      document.removeEventListener("visibilitychange", maybeReconnect);
+      window.removeEventListener("focus", maybeReconnect);
+    };
+  }, [mining]);
 
   useEffect(() => {
     if (activeTab === "manual" && manualResult?.fitness_history) {
@@ -1181,6 +1295,46 @@ const FactorMining: React.FC = () => {
     }
   };
 
+  const restoreMiningTask = async (persisted: PersistedMiningTaskState, silent = false) => {
+    const { taskId, kind } = persisted;
+    if (!taskId) return;
+    if (restoringMiningTaskRef.current === taskId) return;
+
+    try {
+      restoringMiningTaskRef.current = taskId;
+      clearTimers();
+      startClock();
+      setMining(true);
+
+      if (kind === "genetic") {
+        setActiveTab("manual");
+        await checkManualProgress(taskId);
+        pollRef.current = window.setInterval(() => checkManualProgress(taskId), 2000);
+      } else if (kind === "auto_campaign") {
+        setActiveTab("auto");
+        setAutoWorkflowMode("campaign");
+        await checkAutoCampaignProgress(taskId);
+        pollRef.current = window.setInterval(() => checkAutoCampaignProgress(taskId), AUTO_PROGRESS_POLL_MS);
+      } else {
+        setActiveTab("auto");
+        setAutoWorkflowMode("single");
+        await checkAutoProgress(taskId);
+        pollRef.current = window.setInterval(() => checkAutoProgress(taskId), AUTO_PROGRESS_POLL_MS);
+      }
+
+      if (!silent) message.success("已恢复后台挖掘任务");
+    } catch (error: any) {
+      clearTimers();
+      setMining(false);
+      clearPersistedMiningTaskStateAndBanner();
+      if (!silent) {
+        message.error(error?.message || "恢复后台挖掘任务失败");
+      }
+    } finally {
+      restoringMiningTaskRef.current = null;
+    }
+  };
+
   const startManualMining = async (values: any) => {
     const [startDate, endDate] = values.dateRange;
     const requestData = {
@@ -1218,6 +1372,7 @@ const FactorMining: React.FC = () => {
       const response = (await api.startGeneticMining(requestData)) as any;
       const taskId = response?.data?.task_id;
       if (!taskId) throw new Error("未返回任务ID");
+      syncPersistedMiningTaskState(taskId, "genetic", "pending");
       pollRef.current = window.setInterval(() => checkManualProgress(taskId), 2000);
       message.success("手动挖掘任务已启动");
     } catch (error) {
@@ -1241,6 +1396,7 @@ const FactorMining: React.FC = () => {
         fitness_history: chartHistory,
       } as MiningStatus;
       setManualStatus(status);
+      syncPersistedMiningTaskState(taskId, "genetic", status.status);
       if (hasFitnessHistory(chartHistory)) {
         if (typeof window !== "undefined") {
           window.requestAnimationFrame(() => {
@@ -1253,6 +1409,7 @@ const FactorMining: React.FC = () => {
       if (status.status === "completed") {
         clearTimers();
         setMining(false);
+        clearPersistedMiningTaskStateAndBanner();
         const result = (await api.getMiningResults(taskId)) as any;
         if (result.success) {
           const resultFitnessHistory = normalizeFitnessHistory(
@@ -1266,6 +1423,7 @@ const FactorMining: React.FC = () => {
       } else if (status.status === "failed") {
         clearTimers();
         setMining(false);
+        clearPersistedMiningTaskStateAndBanner();
         message.error(`手动挖掘失败: ${status.error || "未知错误"}`);
       }
     } catch (error) {
@@ -1472,6 +1630,7 @@ const FactorMining: React.FC = () => {
       const response = (await autoMiningApi.startTask(requestData)) as any;
       const taskId = response?.data?.task_id;
       if (!taskId) throw new Error("未返回任务ID");
+      syncPersistedMiningTaskState(taskId, "auto", "pending");
       await checkAutoProgress(taskId);
       pollRef.current = window.setInterval(() => checkAutoProgress(taskId), AUTO_PROGRESS_POLL_MS);
       message.success("自动挖掘任务已启动");
@@ -1566,6 +1725,7 @@ const FactorMining: React.FC = () => {
 
       const taskId = response?.data?.task_id;
       if (!taskId) throw new Error("未返回任务ID");
+      syncPersistedMiningTaskState(taskId, "auto_campaign", "pending");
       await checkAutoCampaignProgress(taskId);
       pollRef.current = window.setInterval(() => checkAutoCampaignProgress(taskId), AUTO_PROGRESS_POLL_MS);
       message.success(response?.message || "全自动化挖掘任务已启动");
@@ -1603,10 +1763,12 @@ const FactorMining: React.FC = () => {
         fitness_history: buildProgressHistory(response.data as AutoCampaignStatus),
       } as AutoCampaignStatus;
       setAutoCampaignStatus(status);
+      syncPersistedMiningTaskState(taskId, "auto_campaign", status.status);
       updateChart("progress", status.fitness_history, "自动化研究曲线", "综合分数");
       if (status.status === "completed") {
         clearTimers();
         setMining(false);
+        clearPersistedMiningTaskStateAndBanner();
         const result = (await autoMiningApi.getCampaignResult(taskId)) as any;
         if (result.success) {
           setAutoCampaignResult({
@@ -1617,6 +1779,7 @@ const FactorMining: React.FC = () => {
       } else if (status.status === "failed") {
         clearTimers();
         setMining(false);
+        clearPersistedMiningTaskStateAndBanner();
         message.error(`全自动化挖掘失败: ${status.error || "未知错误"}`);
       }
     } catch (error) {
@@ -1907,6 +2070,7 @@ const FactorMining: React.FC = () => {
       })) as any;
       const taskId = response?.data?.task_id;
       if (!taskId) throw new Error("未返回任务ID");
+      syncPersistedMiningTaskState(taskId, "auto_continue", "pending");
       await checkAutoProgress(taskId);
       pollRef.current = window.setInterval(() => checkAutoProgress(taskId), AUTO_PROGRESS_POLL_MS);
       message.success(response?.message || "继续探索任务已启动");
@@ -1968,10 +2132,16 @@ const FactorMining: React.FC = () => {
         fitness_history: buildProgressHistory(response.data as MiningStatus),
       } as MiningStatus;
       setAutoStatus(status);
+      const taskKind =
+        persistedMiningTaskState?.taskId === taskId && persistedMiningTaskState.kind === "auto_continue"
+          ? "auto_continue"
+          : "auto";
+      syncPersistedMiningTaskState(taskId, taskKind, status.status);
       updateChart("progress", status.fitness_history, "研究曲线", "综合分数");
       if (status.status === "completed") {
         clearTimers();
         setMining(false);
+        clearPersistedMiningTaskStateAndBanner();
         const result = (await autoMiningApi.getTaskResult(taskId)) as any;
         if (result.success) {
           setAutoResult({
@@ -1984,6 +2154,7 @@ const FactorMining: React.FC = () => {
         clearTimers();
         setMining(false);
         setAutoSeedState(null);
+        clearPersistedMiningTaskStateAndBanner();
         message.error(`自动挖掘失败: ${status.error || "未知错误"}`);
       }
     } catch (error) {

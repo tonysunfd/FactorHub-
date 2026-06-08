@@ -56,6 +56,33 @@ class _FakeGeneticMiningService:
                 {
                     "expression": "(Alpha1_code + Alpha2_code)",
                     "fitness": 0.21,
+                    "score": 82.5,
+                    "grade": "A",
+                    "report_url": "/api/mining/reports/manual-factor.html",
+                    "report_metrics": {"sharpe": 1.18, "cagr": 0.22},
+                    "backtest_summary": {
+                        "ic_mean": 0.03,
+                        "ic_ir": 0.4,
+                        "rank_ic_mean": 0.028,
+                        "long_short_sharpe": 1.18,
+                        "wq_fitness": 0.21,
+                    },
+                    "wq_brain": {"wq_rating": "A", "wq_fitness": 0.21},
+                    "component_scores": {"total_score": 82.5},
+                    "anti_overfit": {"score": 75.0, "recommendation": "推荐", "tests": []},
+                    "interpretation": {"summary": "manual ok", "weaknesses": [], "next_steps": []},
+                    "task_details": {
+                        "report_url": "/api/mining/reports/manual-factor.html",
+                        "report_metrics": {"sharpe": 1.18, "cagr": 0.22},
+                        "backtest_summary": {
+                            "ic_mean": 0.03,
+                            "ic_ir": 0.4,
+                            "rank_ic_mean": 0.028,
+                            "long_short_sharpe": 1.18,
+                            "wq_fitness": 0.21,
+                        },
+                        "wq_brain": {"wq_rating": "A", "wq_fitness": 0.21},
+                    },
                     "validation": {
                         "ic_validation": {"ic": 0.03},
                         "ir_validation": {"ir": 0.4},
@@ -122,6 +149,33 @@ def test_run_genetic_mining_persists_running_candidates(monkeypatch) -> None:
             "ic": 0.03,
             "ir": 0.4,
             "fitness": 0.21,
+            "score": 82.5,
+            "grade": "A",
+            "report_url": "/api/mining/reports/manual-factor.html",
+            "report_metrics": {"sharpe": 1.18, "cagr": 0.22},
+            "backtest_summary": {
+                "ic_mean": 0.03,
+                "ic_ir": 0.4,
+                "rank_ic_mean": 0.028,
+                "long_short_sharpe": 1.18,
+                "wq_fitness": 0.21,
+            },
+            "wq_brain": {"wq_rating": "A", "wq_fitness": 0.21},
+            "component_scores": {"total_score": 82.5},
+            "anti_overfit": {"score": 75.0, "recommendation": "推荐", "tests": []},
+            "interpretation": {"summary": "manual ok", "weaknesses": [], "next_steps": []},
+            "task_details": {
+                "report_url": "/api/mining/reports/manual-factor.html",
+                "report_metrics": {"sharpe": 1.18, "cagr": 0.22},
+                "backtest_summary": {
+                    "ic_mean": 0.03,
+                    "ic_ir": 0.4,
+                    "rank_ic_mean": 0.028,
+                    "long_short_sharpe": 1.18,
+                    "wq_fitness": 0.21,
+                },
+                "wq_brain": {"wq_rating": "A", "wq_fitness": 0.21},
+            },
         }
     ]
     assert task["result"]["factors"] == [
@@ -131,6 +185,33 @@ def test_run_genetic_mining_persists_running_candidates(monkeypatch) -> None:
             "ic": 0.03,
             "ir": 0.4,
             "fitness": 0.21,
+            "score": 82.5,
+            "grade": "A",
+            "report_url": "/api/mining/reports/manual-factor.html",
+            "report_metrics": {"sharpe": 1.18, "cagr": 0.22},
+            "backtest_summary": {
+                "ic_mean": 0.03,
+                "ic_ir": 0.4,
+                "rank_ic_mean": 0.028,
+                "long_short_sharpe": 1.18,
+                "wq_fitness": 0.21,
+            },
+            "wq_brain": {"wq_rating": "A", "wq_fitness": 0.21},
+            "component_scores": {"total_score": 82.5},
+            "anti_overfit": {"score": 75.0, "recommendation": "推荐", "tests": []},
+            "interpretation": {"summary": "manual ok", "weaknesses": [], "next_steps": []},
+            "task_details": {
+                "report_url": "/api/mining/reports/manual-factor.html",
+                "report_metrics": {"sharpe": 1.18, "cagr": 0.22},
+                "backtest_summary": {
+                    "ic_mean": 0.03,
+                    "ic_ir": 0.4,
+                    "rank_ic_mean": 0.028,
+                    "long_short_sharpe": 1.18,
+                    "wq_fitness": 0.21,
+                },
+                "wq_brain": {"wq_rating": "A", "wq_fitness": 0.21},
+            },
         }
     ]
 

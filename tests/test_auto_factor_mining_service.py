@@ -4,7 +4,6 @@ import pandas as pd
 from types import SimpleNamespace
 
 from backend.services.auto_factor_mining_service import AutoFactorMiningService
-from backend.services.factor_generator_service import factor_generator_service
 from backend.services.factor_service import factor_service
 
 
@@ -580,7 +579,7 @@ def test_filter_supported_expressions_uses_quantgpt_engine_only(monkeypatch) -> 
     assert supported == ["rank(close)"]
 
 
-def test_run_auto_mining_falls_back_when_llm_candidates_are_not_executable(monkeypatch) -> None:
+def test_run_auto_mining_raises_when_llm_candidates_are_not_executable(monkeypatch) -> None:
     service = AutoFactorMiningService()
 
     sample_df = pd.DataFrame(
@@ -601,87 +600,31 @@ def test_run_auto_mining_falls_back_when_llm_candidates_are_not_executable(monke
         lambda **kwargs: ["rank(ts_mean(close, 5))", "ts_rank(correlation(close, volume, 10), 20)"],
     )
     monkeypatch.setattr(
-        factor_generator_service,
-        "generate_hybrid_factors",
-        lambda base_factors, n_factors: [{"expression": "(close / SMA(close, timeperiod=5))"}],
+        service,
+        "_filter_supported_expressions",
+        lambda expressions, *, sample_frames, limit: [],
     )
-
-    filter_calls = {"count": 0}
-
-    def fake_filter_supported(expressions, *, sample_frames, limit):
-        filter_calls["count"] += 1
-        if filter_calls["count"] == 1:
-            return []
-        return ["(close / SMA(close, timeperiod=5))"]
-
-    monkeypatch.setattr(service, "_filter_supported_expressions", fake_filter_supported)
 
     service._data_service = SimpleNamespace(
         get_stock_universe=lambda universe, date: ["000001.SZ"],
         get_stock_data=lambda stock_code, start_date, end_date: sample_df.copy(),
     )
-
-    def fake_evaluate_expression(**kwargs):
-        expression = kwargs["expression"]
-        if expression != "(close / SMA(close, timeperiod=5))":
-            return None
-        return SimpleNamespace(
-            expression=expression,
-            score=71.5,
-            grade="B",
-            report_metrics={"sharpe": 0.9, "max_drawdown": 0.12},
-            backtest_summary={
-                "long_short_sharpe": 0.9,
-                "long_short_annual": 0.16,
-                "top_group_sharpe": 0.9,
-                "monotonicity_score": 0.7,
-                "spread": 0.02,
-                "group_returns": {"top_minus_bottom_mean": 0.02},
-                "rank_ic_mean": 0.03,
-                "ic_mean": 0.03,
-                "ic_ir": 0.8,
-                "ic_win_rate": 0.6,
-                "turnover": 0.25,
-                "wq_fitness": 0.88,
-            },
-            wq_brain={
-                "wq_rating": "B",
-                "wq_fitness": 0.88,
-                "wq_sharpe": 0.9,
-                "wq_returns": 0.16,
-                "wq_turnover": 0.25,
-                "submittable": True,
-            },
-            component_scores={"total_score": 71.5},
-            anti_overfit={"score": 75.0, "recommendation": "推荐", "tests": []},
-            interpretation={
-                "summary": "fallback ok",
-                "weaknesses": ["仍可优化"],
-                "next_steps": ["继续迭代"],
-                "rating": "B",
-                "rating_reason": "推荐",
-                "improvement_ideas": ["继续迭代"],
-            },
-            diagnostics=[],
-            report_url="/api/mining/reports/fallback.html",
+    try:
+        service.run_auto_mining(
+            prompt="提升量价复合因子的稳定性",
+            base_factors=["close", "volume"],
+            start_date="2024-01-01",
+            end_date="2024-12-31",
+            universe="hs300",
+            benchmark="hs300",
+            n_groups=5,
+            holding_period=5,
+            n_candidates=1,
         )
-
-    monkeypatch.setattr(service, "evaluate_expression", fake_evaluate_expression)
-
-    result = service.run_auto_mining(
-        prompt="提升量价复合因子的稳定性",
-        base_factors=["close", "volume"],
-        start_date="2024-01-01",
-        end_date="2024-12-31",
-        universe="hs300",
-        benchmark="hs300",
-        n_groups=5,
-        holding_period=5,
-        n_candidates=1,
-    )
-
-    assert result["best_score"] == 71.5
-    assert result["factors"][0]["expression"] == "(close / SMA(close, timeperiod=5))"
+    except ValueError as exc:
+        assert str(exc) == "未生成可执行候选表达式"
+    else:
+        raise AssertionError("expected auto mining to fail when no QuantGPT candidate is executable")
 
 
 def test_run_auto_mining_keeps_retrying_until_quantgpt_yields_valid_candidate(monkeypatch) -> None:
@@ -715,11 +658,6 @@ def test_run_auto_mining_keeps_retrying_until_quantgpt_yields_valid_candidate(mo
         return ["good_expr_2"]
 
     monkeypatch.setattr(service, "generate_candidate_expressions", fake_generate_candidate_expressions)
-    monkeypatch.setattr(
-        service,
-        "_generate_fallback_candidate_expressions",
-        lambda **kwargs: [],
-    )
     monkeypatch.setattr(
         service,
         "_filter_supported_expressions",

@@ -1157,15 +1157,42 @@ def _store_manual_mining_result(task_id: str, generations: int, result: dict[str
         ic = validation.get("ic_validation", {}).get("ic", 0.0)
         ir = validation.get("ir_validation", {}).get("ir", 0.0)
         fitness = factor_info.get("fitness", 0.0)
-        discovered_factors.append(
-            {
-                "name": f"Mined_Factor_{index + 1}",
-                "expression": factor_info["expression"],
-                "ic": float(ic) if ic else 0.0,
-                "ir": float(ir) if ir else 0.0,
-                "fitness": float(fitness),
-            }
-        )
+        factor_payload = {
+            "name": f"Mined_Factor_{index + 1}",
+            "expression": factor_info["expression"],
+            "ic": float(ic) if ic else 0.0,
+            "ir": float(ir) if ir else 0.0,
+            "fitness": float(fitness),
+        }
+
+        optional_fields = [
+            "score",
+            "grade",
+            "report_url",
+            "report_metrics",
+            "backtest_summary",
+            "wq_brain",
+            "component_scores",
+            "anti_overfit",
+            "interpretation",
+            "task_details",
+            "quantgpt_task_details",
+            "execution_meta",
+            "engine_type",
+            "dialect",
+            "canonical_expression",
+            "canonical_ast",
+            "raw_expression",
+            "source",
+            "status",
+            "base_factors",
+            "task_id",
+        ]
+        for field in optional_fields:
+            if field in factor_info and factor_info.get(field) is not None:
+                factor_payload[field] = factor_info.get(field)
+
+        discovered_factors.append(factor_payload)
 
     logbook = result.get("logbook")
     if logbook is not None:

@@ -323,57 +323,7 @@ class AutoFactorMiningService:
                 continuation_context=continuation_context,
             )
 
-        if expressions:
-            return expressions[:n_candidates]
-
-        pool = factor_generator_service.generate_hybrid_factors(
-            base_factor_codes or ["close", "volume", "amount"],
-            n_factors=max(n_candidates * 4, 24),
-        )
-        deduped: list[str] = []
-        seen = {_normalize_expression(item) for item in (previous_expressions or [])}
-        for item in pool:
-            expression = str(item.get("expression") or "").strip()
-            if not expression:
-                continue
-            key = _normalize_expression(expression)
-            if key in seen:
-                continue
-            seen.add(key)
-            deduped.append(expression)
-            if len(deduped) >= n_candidates:
-                break
-        return deduped
-
-    def _generate_fallback_candidate_expressions(
-        self,
-        *,
-        base_factor_codes: list[str],
-        n_candidates: int,
-        previous_expressions: list[str] | None = None,
-        extra_excludes: list[str] | None = None,
-    ) -> list[str]:
-        pool = factor_generator_service.generate_hybrid_factors(
-            base_factor_codes or ["close", "volume", "amount"],
-            n_factors=max(n_candidates * 4, 24),
-        )
-        deduped: list[str] = []
-        seen = {
-            _normalize_expression(item)
-            for item in [*(previous_expressions or []), *(extra_excludes or [])]
-        }
-        for item in pool:
-            expression = str(item.get("expression") or "").strip()
-            if not expression:
-                continue
-            key = _normalize_expression(expression)
-            if key in seen:
-                continue
-            seen.add(key)
-            deduped.append(expression)
-            if len(deduped) >= n_candidates:
-                break
-        return deduped
+        return expressions[:n_candidates]
 
     def _collect_sample_frames(
         self,
@@ -681,21 +631,6 @@ class AutoFactorMiningService:
                 sample_frames=sample_frames,
                 limit=target_count,
             )
-
-            if len(supported) < target_count:
-                fallback_candidates = self._generate_fallback_candidate_expressions(
-                    base_factor_codes=base_factor_codes,
-                    n_candidates=max(target_count * 2, target_count),
-                    previous_expressions=seed_expressions,
-                    extra_excludes=supported,
-                )
-                supported.extend(
-                    self._filter_supported_expressions(
-                        fallback_candidates,
-                        sample_frames=sample_frames,
-                        limit=target_count - len(supported),
-                    )
-                )
 
             for expression in supported:
                 key = _normalize_expression(expression)
