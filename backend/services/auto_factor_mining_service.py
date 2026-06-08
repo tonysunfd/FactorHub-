@@ -360,6 +360,11 @@ class AutoFactorMiningService:
             max_factor_count=max_factor_count,
             candidate_limit=candidate_limit,
             selection_mode="auto",
+            direction=direction or parent_request.get("direction"),
+            start_date=parent_request.get("start_date"),
+            end_date=parent_request.get("end_date"),
+            universe=parent_request.get("universe"),
+            benchmark=parent_request.get("benchmark"),
             extra_context=context["summary_text"],
             exclude_factors=exclude_factors,
         )
@@ -828,22 +833,26 @@ class AutoFactorMiningService:
         current_prompt = prompt
         best_round_result: dict[str, Any] | None = None
         best_round_task_id: str | None = None
+        last_round_result: dict[str, Any] | None = None
 
         for round_index in range(1, max(exploration_rounds, 1) + 1):
             continuation_context = None
             continuation_hypothesis = None
             previous_round = rounds[-1] if rounds else None
             previous_base_factors = list(current_base_factors)
-            if previous_round:
-                continuation_context = {
-                    "primary_problem": previous_round.get("continuation_feedback", {}).get("reason")
-                    or previous_round.get("final_round_evaluation", {}).get("primary_problem"),
-                    "recommended_goal": direction or previous_round.get("final_round_evaluation", {}).get("recommended_goal"),
-                    "suggested_actions": previous_round.get("final_round_evaluation", {}).get("suggested_actions", []),
-                    "metric_snapshot": previous_round.get("final_round_evaluation", {}).get("metric_snapshot", {}),
-                }
+            if previous_round and last_round_result is not None:
+                continuation_context = self.build_continuation_context(
+                    result=last_round_result,
+                    request_payload={
+                        "base_factors": previous_round.get("input_base_factors", []),
+                        "direction": direction,
+                    },
+                    prompt=prompt,
+                    factor_update_mode=factor_update_mode,
+                    additional_factor_count=additional_factor_count_per_round,
+                )
                 continuation_hypothesis = {
-                    "hypothesis": f"第 {round_index} 轮继续围绕 {continuation_context.get('recommended_goal') or '综合优化'} 调整基础因子组合。",
+                    "hypothesis": f"第 {round_index} 轮基于上一轮单轮研究结果，继续围绕 {continuation_context.get('recommended_goal') or '综合优化'} 调整基础因子组合。",
                     "reason": continuation_context.get("primary_problem") or "上一轮仍存在可提升空间。",
                     "target_goal": continuation_context.get("recommended_goal") or "提升综合分数",
                     "primary_problem": continuation_context.get("primary_problem"),
@@ -932,7 +941,7 @@ class AutoFactorMiningService:
                 current_base_factors=current_base_factors,
             )
             continuation_feedback = self._build_continuation_feedback(
-                previous_best_score=previous_round.get("best_score") if previous_round else None,
+                previous_best_score=best_round_result.get("best_score") if best_round_result else None,
                 current_best_score=round_result.get("best_score", 0.0),
                 retention_count=len(selected),
                 direction=direction or "score",
@@ -971,6 +980,7 @@ class AutoFactorMiningService:
             aggregate_best.append(round_result.get("best_score", 0.0))
             aggregate_avg.append(round_result.get("avg_score", 0.0))
             retained_factors = selected
+            last_round_result = round_result
 
             if best_round_result is None:
                 best_round_result = round_result
@@ -1006,25 +1016,23 @@ class AutoFactorMiningService:
             if round_index >= exploration_rounds:
                 break
 
-            next_factor_context = self.build_continuation_context(
-                result=round_result,
-                request_payload={
+            selection = self.select_continue_factors(
+                parent_result=round_result,
+                parent_request={
                     "base_factors": current_base_factors,
                     "direction": direction,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "universe": universe,
+                    "benchmark": benchmark,
                 },
                 prompt=prompt,
+                direction=direction,
                 factor_update_mode=factor_update_mode,
-                additional_factor_count=additional_factor_count_per_round,
-            )
-            selection = self.select_factors(
-                prompt=f"{prompt} {direction or ''}".strip(),
                 max_factor_count=additional_factor_count_per_round if factor_update_mode == "append" else max(
                     len(current_base_factors), additional_factor_count_per_round
                 ),
                 candidate_limit=80,
-                selection_mode="auto",
-                extra_context=next_factor_context["summary_text"],
-                exclude_factors=current_base_factors if factor_update_mode == "append" else [],
             )
             candidate_factors = selection.get("selected_factors", [])
             if round_summary.get("continuation_hypothesis") is not None:

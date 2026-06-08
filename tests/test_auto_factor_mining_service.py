@@ -81,6 +81,7 @@ def test_filter_retained_factors_supports_match_modes() -> None:
 
 def test_run_auto_campaign_returns_real_rounds(monkeypatch) -> None:
     service = AutoFactorMiningService()
+    continuation_calls: list[dict[str, object]] = []
 
     def fake_run_auto_mining(**kwargs):
         base_factors = kwargs["base_factors"]
@@ -135,15 +136,22 @@ def test_run_auto_campaign_returns_real_rounds(monkeypatch) -> None:
             },
         }
 
-    def fake_select_factors(**kwargs):
+    def fake_select_continue_factors(**kwargs):
+        continuation_calls.append(kwargs)
         return {
             "selected_factors": ["ExtraFactor"],
             "selection_rationale": "补充一个新因子",
             "per_factor_reason": {"ExtraFactor": "用于下一轮探索"},
+            "continuation_context": {
+                "primary_problem": "第 1 轮问题",
+                "recommended_goal": "score",
+                "suggested_actions": ["第 1 轮动作"],
+                "summary_text": "沿着第 1 轮问题继续优化",
+            },
         }
 
     monkeypatch.setattr(service, "run_auto_mining", fake_run_auto_mining)
-    monkeypatch.setattr(service, "select_factors", fake_select_factors)
+    monkeypatch.setattr(service, "select_continue_factors", fake_select_continue_factors)
 
     snapshots = []
     result = service.run_auto_campaign(
@@ -172,6 +180,9 @@ def test_run_auto_campaign_returns_real_rounds(monkeypatch) -> None:
     assert result["best_score"] == 80
     assert result["retained_factors"][0]["expression"] == "expr_2"
     assert snapshots[-1]["current_round"] == 2
+    assert continuation_calls[0]["parent_result"]["round_evaluation"]["primary_problem"] == "第 1 轮问题"
+    assert result["rounds"][1]["continuation_hypothesis"]["reason"] == "第 1 轮问题"
+    assert result["rounds"][1]["continuation_hypothesis"]["target_goal"] == "score"
 
 
 def test_run_auto_campaign_progress_uses_current_round_snapshot(monkeypatch) -> None:
@@ -202,7 +213,7 @@ def test_run_auto_campaign_progress_uses_current_round_snapshot(monkeypatch) -> 
             },
         }
 
-    def fake_select_factors(**kwargs):
+    def fake_select_continue_factors(**kwargs):
         return {
             "selected_factors": ["ExtraFactor"],
             "selection_rationale": "补充一个新因子",
@@ -210,7 +221,7 @@ def test_run_auto_campaign_progress_uses_current_round_snapshot(monkeypatch) -> 
         }
 
     monkeypatch.setattr(service, "run_auto_mining", fake_run_auto_mining)
-    monkeypatch.setattr(service, "select_factors", fake_select_factors)
+    monkeypatch.setattr(service, "select_continue_factors", fake_select_continue_factors)
 
     snapshots = []
     service.run_auto_campaign(
@@ -245,6 +256,62 @@ def test_run_auto_campaign_progress_uses_current_round_snapshot(monkeypatch) -> 
     assert latest_round["continuation_feedback"] is None
     assert latest_round["input_base_factors"] == ["Alpha1", "ExtraFactor"]
     assert latest_round["all_factors"][0]["expression"] == "expr_2"
+
+
+def test_select_continue_factors_passes_parent_context_to_llm_selection(monkeypatch) -> None:
+    service = AutoFactorMiningService()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        service,
+        "select_factors",
+        lambda **kwargs: captured.setdefault("kwargs", kwargs) or {
+            "selected_factors": ["Beta"],
+            "selection_rationale": "ok",
+            "per_factor_reason": {"Beta": "ok"},
+        },
+    )
+
+    result = service.select_continue_factors(
+        parent_result={
+            "round_evaluation": {
+                "base_factors": ["Alpha"],
+                "primary_problem": "Sharpe 偏低",
+                "recommended_goal": "ls_sharpe",
+                "suggested_actions": ["补充波动率因子"],
+                "metric_snapshot": {"score": 61},
+            },
+            "factors": [
+                {
+                    "score": 61,
+                    "report_metrics": {"sharpe": 0.5},
+                    "backtest_summary": {"long_short_sharpe": 0.5, "long_short_annual": 0.08},
+                    "interpretation": {"weaknesses": ["Sharpe 偏低"], "next_steps": ["补充波动率因子"]},
+                }
+            ],
+        },
+        parent_request={
+            "base_factors": ["Alpha"],
+            "direction": "ls_sharpe",
+            "start_date": "2024-01-01",
+            "end_date": "2024-12-31",
+            "universe": "hs300",
+            "benchmark": "hs300",
+        },
+        prompt="提升风险调整后收益",
+        direction="ls_sharpe",
+        factor_update_mode="append",
+        max_factor_count=3,
+        candidate_limit=50,
+    )
+
+    assert captured["kwargs"]["direction"] == "ls_sharpe"
+    assert captured["kwargs"]["start_date"] == "2024-01-01"
+    assert captured["kwargs"]["end_date"] == "2024-12-31"
+    assert captured["kwargs"]["universe"] == "hs300"
+    assert captured["kwargs"]["benchmark"] == "hs300"
+    assert "Sharpe 偏低" in captured["kwargs"]["extra_context"]
+    assert result["continuation_context"]["recommended_goal"] == "ls_sharpe"
 
 
 def test_select_factors_uses_real_llm_flow(monkeypatch) -> None:
