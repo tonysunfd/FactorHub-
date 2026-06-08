@@ -81,6 +81,17 @@ const startBackend = () => {
   return child.pid
 }
 
+const waitForBackendHealth = async (attempts = 8, delayMs = 800) => {
+  for (let index = 0; index < attempts; index += 1) {
+    const health = await checkBackendHealth()
+    if (health.running) {
+      return health
+    }
+    await new Promise(resolve => setTimeout(resolve, delayMs))
+  }
+  return checkBackendHealth()
+}
+
 const collectRunningBackendPids = () => {
   const pids = new Set<number>()
 
@@ -150,7 +161,11 @@ export default defineConfig({
           sendJson(res, 200, health)
         })
 
-        server.middlewares.use('/__factorhub_backend/start', async (_req, res) => {
+        server.middlewares.use('/__factorhub_backend/start', async (req, res) => {
+          if (req.method !== 'POST' && req.method !== 'GET') {
+            sendJson(res, 405, { running: false, message: 'Method Not Allowed' })
+            return
+          }
           const before = await checkBackendHealth()
           if (before.running) {
             sendJson(res, 200, { running: true, alreadyRunning: true })
@@ -160,13 +175,14 @@ export default defineConfig({
           try {
             const stoppedPids = await ensureSingleBackend()
             const pid = startBackend()
-            await new Promise(resolve => setTimeout(resolve, 1800))
-            const after = await checkBackendHealth()
+            const after = await waitForBackendHealth()
             sendJson(res, after.running ? 200 : 202, {
               ...after,
               pid,
               stoppedPids,
-              message: after.running ? '后端已启动' : '后端正在启动，请稍后刷新状态'
+              message: after.running ? '后端已启动' : '后端启动超时，请查看日志',
+              stderrTail: after.running ? undefined : readTail(backendStderrLog),
+              stdoutTail: after.running ? undefined : readTail(backendStdoutLog)
             })
           } catch (error) {
             sendJson(res, 500, {
@@ -177,18 +193,22 @@ export default defineConfig({
           }
         })
 
-        server.middlewares.use('/__factorhub_backend/restart', async (_req, res) => {
+        server.middlewares.use('/__factorhub_backend/restart', async (req, res) => {
+          if (req.method !== 'POST' && req.method !== 'GET') {
+            sendJson(res, 405, { running: false, message: 'Method Not Allowed' })
+            return
+          }
           try {
             const stoppedPids = await ensureSingleBackend()
             const pid = startBackend()
-            await new Promise(resolve => setTimeout(resolve, 1800))
-
-            const after = await checkBackendHealth()
+            const after = await waitForBackendHealth()
             sendJson(res, after.running ? 200 : 202, {
               ...after,
               pid,
               stoppedPids,
-              message: after.running ? '后端已重启并加载最新代码' : '后端正在重启，请稍后刷新状态'
+              message: after.running ? '后端已重启并加载最新代码' : '后端重启超时，请查看日志',
+              stderrTail: after.running ? undefined : readTail(backendStderrLog),
+              stdoutTail: after.running ? undefined : readTail(backendStdoutLog)
             })
           } catch (error) {
             sendJson(res, 500, {
