@@ -436,6 +436,49 @@ const normalizeRDAgentResultForDashboard = (result: AutoCampaignResult | null | 
   };
 };
 
+const normalizeAutoCampaignResultForDashboard = (result: AutoCampaignResult | null | undefined): AutoCampaignResult | null => {
+  if (!result) return null;
+  const rounds = (result.rounds || []).map((round: any) => {
+    const factors = (round.all_factors || round.candidates || []).map((factor: any) => ({
+      ...factor,
+      task_details: buildFactorTaskDetailsForDashboard(factor) || factor?.task_details || factor?.quantgpt_task_details,
+      quantgpt_task_details: buildFactorTaskDetailsForDashboard(factor) || factor?.quantgpt_task_details || factor?.task_details,
+    }));
+    return {
+      ...round,
+      all_factors: factors,
+      candidates: factors,
+      retained_factors: (round.retained_factors || factors.slice(0, round.retained_count || 0)).map((factor: any) => ({
+        ...factor,
+        task_details: buildFactorTaskDetailsForDashboard(factor) || factor?.task_details || factor?.quantgpt_task_details,
+        quantgpt_task_details: buildFactorTaskDetailsForDashboard(factor) || factor?.quantgpt_task_details || factor?.task_details,
+      })),
+    };
+  });
+  const finalRound = rounds[rounds.length - 1] as any;
+  const finalRoundFactors = (result.final_round_result?.factors || finalRound?.all_factors || []) as AutoFactor[];
+  return {
+    ...result,
+    rounds,
+    retained_factors: (result.retained_factors || []).map((factor: any) => ({
+      ...factor,
+      task_details: buildFactorTaskDetailsForDashboard(factor) || factor?.task_details || factor?.quantgpt_task_details,
+      quantgpt_task_details: buildFactorTaskDetailsForDashboard(factor) || factor?.quantgpt_task_details || factor?.task_details,
+    })),
+    final_round_result: result.final_round_result
+      ? {
+          ...result.final_round_result,
+          factors: finalRoundFactors.map((factor: any) => ({
+            ...factor,
+            task_details: buildFactorTaskDetailsForDashboard(factor) || factor?.task_details || factor?.quantgpt_task_details,
+            quantgpt_task_details: buildFactorTaskDetailsForDashboard(factor) || factor?.quantgpt_task_details || factor?.task_details,
+          })),
+          round_evaluation: result.final_round_result.round_evaluation || finalRound?.final_round_evaluation || {},
+        }
+      : result.final_round_result,
+  };
+};
+
 const mergeWQStateIntoFactor = (factor: AutoFactor, updates: LocalWQBrainState): AutoFactor => {
   const nextWQBrain = {
     ...(factor.wq_brain || {}),
@@ -575,6 +618,19 @@ const getRoundEvaluation = (result: AutoMiningResult | null): Record<string, any
     result.round_evaluation
     || bestFactor?.task_details?.round_evaluation
     || bestFactor?.quantgpt_task_details?.round_evaluation
+    || null
+  );
+};
+
+const getCampaignRoundEvaluation = (result: AutoCampaignResult | null): Record<string, any> | null => {
+  if (!result) return null;
+  const finalRound = result.rounds?.[result.rounds.length - 1];
+  const finalFactor = result.final_round_result?.factors?.[0] || finalRound?.retained_factors?.[0] || finalRound?.all_factors?.[0];
+  return (
+    result.final_round_result?.round_evaluation
+    || finalRound?.final_round_evaluation
+    || finalFactor?.task_details?.round_evaluation
+    || finalFactor?.quantgpt_task_details?.round_evaluation
     || null
   );
 };
@@ -761,11 +817,18 @@ const FactorMining: React.FC = () => {
   const [wqBulkSyncing, setWqBulkSyncing] = useState(false);
 
   const currentStatus = activeTab === "manual" ? manualStatus : autoStatus;
+  const currentAutoDisplayResult = useMemo(() => {
+    if (activeTab !== "auto") return autoResult;
+    if (autoWorkflowMode === "campaign") {
+      return autoCampaignResult?.final_round_result || null;
+    }
+    return autoResult;
+  }, [activeTab, autoResult, autoCampaignResult, autoWorkflowMode]);
   const continuationInsightSummary = useMemo(
-    () => buildContinuationInsightSummary(autoResult, autoStatus),
-    [autoResult, autoStatus]
+    () => buildContinuationInsightSummary(currentAutoDisplayResult, autoWorkflowMode === "campaign" ? (autoCampaignStatus as unknown as MiningStatus | null) : autoStatus),
+    [currentAutoDisplayResult, autoStatus, autoCampaignStatus, autoWorkflowMode]
   );
-  const currentResult = activeTab === "manual" ? manualResult : autoResult;
+  const currentResult = activeTab === "manual" ? manualResult : currentAutoDisplayResult;
   const isAutoLikeTab = activeTab !== "manual";
 
   const patchAutoResultFactor = (targetIndex: number, updater: (factor: AutoFactor) => AutoFactor) => {
@@ -1758,9 +1821,30 @@ const FactorMining: React.FC = () => {
     try {
       const response = (await autoMiningApi.getCampaignStatus(taskId)) as any;
       if (!response.success) return;
-      const status = {
+      const rawStatus = {
         ...(response.data as AutoCampaignStatus),
         fitness_history: buildProgressHistory(response.data as AutoCampaignStatus),
+      } as AutoCampaignStatus;
+      const normalizedCampaignResult = normalizeAutoCampaignResultForDashboard({
+        rounds: rawStatus.rounds || [],
+        retained_factors: [],
+        final_round_result: rawStatus.latest_round
+          ? {
+              factors: rawStatus.latest_round.all_factors || rawStatus.latest_round.candidates || [],
+              best_score: Number(rawStatus.latest_round.best_score || 0),
+              avg_score: Number(rawStatus.latest_round.avg_score || 0),
+              generations: Number(rawStatus.current_generation || 0),
+              round_evaluation: rawStatus.latest_round.final_round_evaluation || {},
+            }
+          : undefined,
+        best_score: Number(rawStatus.best_fitness || 0),
+        avg_score: Number(rawStatus.avg_fitness || 0),
+        fitness_history: rawStatus.fitness_history,
+      });
+      const status = {
+        ...rawStatus,
+        rounds: normalizedCampaignResult?.rounds || rawStatus.rounds,
+        latest_round: normalizedCampaignResult?.rounds?.[normalizedCampaignResult.rounds.length - 1] || rawStatus.latest_round,
       } as AutoCampaignStatus;
       setAutoCampaignStatus(status);
       syncPersistedMiningTaskState(taskId, "auto_campaign", status.status);
@@ -1771,10 +1855,10 @@ const FactorMining: React.FC = () => {
         clearPersistedMiningTaskStateAndBanner();
         const result = (await autoMiningApi.getCampaignResult(taskId)) as any;
         if (result.success) {
-          setAutoCampaignResult({
+          setAutoCampaignResult(normalizeAutoCampaignResultForDashboard({
             ...result.data,
             fitness_history: normalizeFitnessHistory(result.data?.fitness_history || status.fitness_history),
-          });
+          }));
         }
       } else if (status.status === "failed") {
         clearTimers();
@@ -3776,12 +3860,16 @@ const FactorMining: React.FC = () => {
 
     if (currentResult) {
       const factorsToRender = (currentResult as any).factors || [];
-      const roundEvaluation = isAutoLikeTab ? getRoundEvaluation(currentResult as AutoMiningResult) : null;
+      const roundEvaluation = isAutoLikeTab
+        ? (autoWorkflowMode === "campaign"
+            ? getCampaignRoundEvaluation(autoCampaignResult)
+            : getRoundEvaluation(currentResult as AutoMiningResult))
+        : null;
       return (
         <div>
           <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
-            <Col xs={24} sm={8}><Card size="small"><div className="stat-label">{activeTab === "manual" ? "最佳适应度" : "最佳分数"}</div><div className="stat-value">{activeTab === "manual" ? (manualResult?.best_fitness?.toFixed?.(4) || "0.0000") : (autoResult?.best_score?.toFixed?.(1) || "0.0")}</div></Card></Col>
-            <Col xs={24} sm={8}><Card size="small"><div className="stat-label">{activeTab === "manual" ? "平均适应度" : "平均分数"}</div><div className="stat-value">{activeTab === "manual" ? (manualResult?.avg_fitness?.toFixed?.(4) || "0.0000") : (autoResult?.avg_score?.toFixed?.(1) || "0.0")}</div></Card></Col>
+            <Col xs={24} sm={8}><Card size="small"><div className="stat-label">{activeTab === "manual" ? "最佳适应度" : "最佳分数"}</div><div className="stat-value">{activeTab === "manual" ? (manualResult?.best_fitness?.toFixed?.(4) || "0.0000") : ((autoWorkflowMode === "campaign" ? autoCampaignResult?.best_score : autoResult?.best_score)?.toFixed?.(1) || "0.0")}</div></Card></Col>
+            <Col xs={24} sm={8}><Card size="small"><div className="stat-label">{activeTab === "manual" ? "平均适应度" : "平均分数"}</div><div className="stat-value">{activeTab === "manual" ? (manualResult?.avg_fitness?.toFixed?.(4) || "0.0000") : ((autoWorkflowMode === "campaign" ? autoCampaignResult?.avg_score : autoResult?.avg_score)?.toFixed?.(1) || "0.0")}</div></Card></Col>
             <Col xs={24} sm={8}><Card size="small"><div className="stat-label">发现因子数</div><div className="stat-value">{factorsToRender.length}</div></Card></Col>
           </Row>
 
