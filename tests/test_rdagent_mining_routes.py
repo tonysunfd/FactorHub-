@@ -67,6 +67,9 @@ def test_rdagent_start_status_results_and_tasks(monkeypatch) -> None:
             {
                 "round_index": 1,
                 "task_id": f"{task_id}-round-1",
+                "hypothesis": {"statement": "量价共振因子可提升综合分数"},
+                "feedback": {"observations": "本轮有 1 个候选通过筛选", "hypothesis_evaluation": "supported"},
+                "evaluation": {"best_score": 81.0, "avg_score": 74.0},
                 "candidates": [{"name": "Candidate_1", "expression": "rank(close)", "status": "accepted"}],
                 "all_factors": [{"name": "Candidate_1", "expression": "rank(close)", "status": "accepted"}],
             }
@@ -78,6 +81,7 @@ def test_rdagent_start_status_results_and_tasks(monkeypatch) -> None:
             "retained_factors": mining.rdagent_tasks[task_id]["candidates"],
             "fitness_history": mining.rdagent_tasks[task_id]["fitness_history"],
             "final_round_result": {"factors": mining.rdagent_tasks[task_id]["candidates"]},
+            "continue_mining_request": {"objective": "继续优化量价共振因子"},
         }
 
     created_tasks: list[asyncio.Task] = []
@@ -115,6 +119,7 @@ def test_rdagent_start_status_results_and_tasks(monkeypatch) -> None:
         assert status["data"]["status"] == "completed"
         assert status["data"]["retained_count"] == 1
         assert result["data"]["final_round_result"]["factors"][0]["expression"] == "rank(close)"
+        assert result["data"]["continue_mining_request"]["objective"] == "继续优化量价共振因子"
         assert tasks["data"][0]["task_id"] == task_id
         assert tasks["data"][0]["kind"] == "rdagent"
 

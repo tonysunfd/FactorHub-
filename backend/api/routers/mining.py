@@ -301,166 +301,6 @@ def _raise_if_rdagent_task_cancel_requested(task_id: str) -> None:
         raise RDAgentTaskCancelled(f"RDAgent 任务 {task_id} 已终止")
 
 
-class _LocalRDAgentBackend:
-    def propose_hypothesis(self, *, config: RDAgentMiningConfig, rounds: list[dict[str, Any]], iteration: int) -> dict[str, Any]:
-        previous_round = rounds[-1] if rounds else None
-        target_goal = config.direction or "score"
-        if previous_round and previous_round.get("feedback", {}).get("next_goal"):
-            target_goal = previous_round["feedback"]["next_goal"]
-        return {
-            "summary": f"第 {iteration} 轮围绕 {target_goal} 优化 {config.objective}",
-            "target_goal": target_goal,
-            "objective": config.objective,
-            "base_factors": list(config.base_factors),
-            "candidate_universe": list(config.candidate_universe),
-            "previous_feedback_id": config.previous_feedback_id,
-        }
-
-    def hypothesis_to_experiment(
-        self,
-        *,
-        config: RDAgentMiningConfig,
-        hypothesis: dict[str, Any],
-        rounds: list[dict[str, Any]],
-        iteration: int,
-    ) -> dict[str, Any]:
-        return {
-            "round_index": iteration,
-            "candidate_limit": max(int(config.candidates_per_iteration or 1), 1),
-            "base_factors": list(config.base_factors),
-            "candidate_universe": list(config.candidate_universe),
-            "hypothesis": hypothesis,
-        }
-
-    def code_experiment(
-        self,
-        *,
-        config: RDAgentMiningConfig,
-        experiment: dict[str, Any],
-        hypothesis: dict[str, Any],
-        rounds: list[dict[str, Any]],
-        iteration: int,
-    ) -> dict[str, Any]:
-        current_base_factors = list(config.base_factors)
-        if not current_base_factors:
-            selection = auto_factor_mining_service.select_factors(
-                prompt=config.objective,
-                max_factor_count=max(int(config.candidates_per_iteration or 1), 1),
-                candidate_limit=40,
-                selection_mode="auto",
-            )
-            current_base_factors = selection.get("selected_factors", [])
-        return {
-            "round_index": iteration,
-            "base_factors": current_base_factors,
-            "candidate_universe": list(config.candidate_universe),
-            "experiment": experiment,
-            "hypothesis": hypothesis,
-        }
-
-    def run_experiment(
-        self,
-        *,
-        config: RDAgentMiningConfig,
-        coded_experiment: dict[str, Any],
-        hypothesis: dict[str, Any],
-        rounds: list[dict[str, Any]],
-        iteration: int,
-    ) -> dict[str, Any]:
-        current_base_factors = list(coded_experiment.get("base_factors") or config.base_factors)
-        previous_expressions = list(config.previous_expressions or [])
-        for round_item in rounds:
-            for candidate in round_item.get("candidates") or []:
-                expression = str(candidate.get("expression") or "").strip()
-                if expression:
-                    previous_expressions.append(expression)
-
-        auto_result = auto_factor_mining_service.run_auto_mining(
-            prompt=config.objective,
-            base_factors=current_base_factors,
-            start_date=config.start_date,
-            end_date=config.end_date,
-            universe=config.universe,
-            benchmark=config.benchmark,
-            n_groups=config.n_groups,
-            holding_period=config.holding_period,
-            n_candidates=max(int(config.candidates_per_iteration or 1), 1),
-            direction=config.direction,
-            neutralize_industry=config.neutralize_industry,
-            neutralize_cap=config.neutralize_cap,
-            previous_expressions=previous_expressions,
-            continuation_context={
-                "primary_problem": hypothesis.get("summary"),
-                "recommended_goal": hypothesis.get("target_goal"),
-            },
-        )
-        candidates = []
-        for index, factor in enumerate(auto_result.get("factors", [])):
-            factor_copy = dict(factor)
-            score = float(factor_copy.get("score", 0.0) or 0.0)
-            factor_copy["candidate_id"] = f"{config.task_id}-round-{iteration}-candidate-{index + 1}"
-            factor_copy["status"] = "accepted" if index == 0 else "watchlist"
-            factor_copy["automation_meta"] = {
-                **(factor_copy.get("automation_meta") or {}),
-                "round_index": iteration,
-                "round_task_id": f"{config.task_id}-round-{iteration}",
-                "source": "rdagent",
-            }
-            task_details = dict(factor_copy.get("task_details") or {})
-            task_details["rdagent"] = {
-                **(task_details.get("rdagent") or {}),
-                "candidate_score": {
-                    "score": score,
-                    "report_metrics": factor_copy.get("report_metrics") or {},
-                    "backtest_summary": factor_copy.get("backtest_summary") or {},
-                    "report_url": factor_copy.get("report_url"),
-                },
-                "hypothesis": hypothesis,
-            }
-            factor_copy["task_details"] = task_details
-            factor_copy["quantgpt_task_details"] = task_details
-            candidates.append(factor_copy)
-
-        metrics = {
-            "score": float(auto_result.get("best_score", 0.0) or 0.0),
-            "avg_score": float(auto_result.get("avg_score", 0.0) or 0.0),
-        }
-        best_factor = candidates[0] if candidates else {}
-        return {
-            "candidates": candidates,
-            "metrics": metrics,
-            "report_ref": best_factor.get("report_url"),
-            "backtest_engine": "factorhub_auto_mining",
-            "raw_result": auto_result,
-        }
-
-    def generate_feedback(
-        self,
-        *,
-        config: RDAgentMiningConfig,
-        hypothesis: dict[str, Any],
-        experiment: dict[str, Any],
-        run_result: dict[str, Any],
-        rounds: list[dict[str, Any]],
-        iteration: int,
-    ) -> dict[str, Any]:
-        metrics = run_result.get("metrics") or {}
-        score = float(metrics.get("score", 0.0) or 0.0)
-        target_goal = config.direction or "score"
-        if score < 60:
-            next_goal = "ls_sharpe" if target_goal == "score" else target_goal
-            reason = "当前综合表现一般，下一轮优先提升稳定性和 Sharpe。"
-        else:
-            next_goal = target_goal
-            reason = "当前结果可继续沿既定方向做小步优化。"
-        return {
-            "summary": reason,
-            "next_goal": next_goal,
-            "score": score,
-            "iteration": iteration,
-        }
-
-
 def _build_rdagent_round_from_service(round_item: dict[str, Any], task_id: str) -> dict[str, Any]:
     evaluation = round_item.get("evaluation") or {}
     feedback = round_item.get("feedback") or {}
@@ -475,34 +315,51 @@ def _build_rdagent_round_from_service(round_item: dict[str, Any], task_id: str) 
         "input_base_factors": list(experiment.get("base_factors") or hypothesis.get("base_factors") or []),
         "selected_factors": list(experiment.get("base_factors") or hypothesis.get("base_factors") or []),
         "factor_update_mode": "append",
+        "hypothesis": {
+            "statement": hypothesis.get("statement") or hypothesis.get("summary") or hypothesis.get("hypothesis"),
+            "reason": hypothesis.get("reason"),
+            "research_direction": hypothesis.get("research_direction") or hypothesis.get("target_goal"),
+            "expected_signal": hypothesis.get("expected_signal"),
+        },
+        "evaluation": {
+            **evaluation,
+            "report_ref": evaluation.get("report_ref"),
+        },
+        "feedback": {
+            "observations": feedback.get("observations") or feedback.get("summary"),
+            "hypothesis_evaluation": "supported" if feedback.get("decision") else "needs_revision",
+            "next_hypothesis": feedback.get("next_hypothesis") or feedback.get("next_goal"),
+            "reason": feedback.get("reason"),
+            "decision": feedback.get("decision"),
+        },
         "continuation_hypothesis": {
-            "hypothesis": hypothesis.get("summary"),
-            "target_goal": hypothesis.get("target_goal"),
+            "hypothesis": hypothesis.get("statement") or hypothesis.get("summary"),
+            "target_goal": hypothesis.get("research_direction") or hypothesis.get("target_goal"),
             "candidate_factors": list(experiment.get("base_factors") or []),
         },
         "continuation_feedback": {
-            "reason": feedback.get("summary"),
-            "next_goal": feedback.get("next_goal"),
-            "decision": True,
+            "reason": feedback.get("reason") or feedback.get("summary"),
+            "next_goal": feedback.get("next_hypothesis") or feedback.get("next_goal"),
+            "decision": feedback.get("decision", True),
         },
         "retained_count": len([candidate for candidate in candidates if candidate.get("status") == "accepted"]),
         "retained_factors": [candidate for candidate in candidates if candidate.get("status") == "accepted"],
         "candidates": candidates,
         "all_factors": candidates,
         "manual_report": {
-            "summary": feedback.get("summary"),
-            "score": feedback.get("score"),
+            "summary": feedback.get("observations") or feedback.get("summary"),
+            "score": evaluation.get("best_score"),
         },
-        "continue_mining_request": {
-            "objective": hypothesis.get("objective"),
+        "continue_mining_request": round_item.get("continue_mining_request") or {
+            "objective": feedback.get("next_hypothesis") or hypothesis.get("statement") or hypothesis.get("objective"),
             "candidate_universe": list(hypothesis.get("candidate_universe") or []),
             "base_factors": list(experiment.get("base_factors") or []),
             "continuation_of": task_id,
             "previous_feedback_id": f"{task_id}-feedback-{round_item.get('round_index', 0)}",
         },
         "final_round_evaluation": {
-            "recommended_goal": feedback.get("next_goal"),
-            "primary_problem": feedback.get("summary"),
+            "recommended_goal": feedback.get("next_hypothesis") or feedback.get("next_goal"),
+            "primary_problem": feedback.get("reason") or feedback.get("summary"),
             "metric_snapshot": evaluation.get("metrics") or {},
         },
     }
@@ -544,7 +401,7 @@ async def _run_rdagent_mining(task_id: str, request: RDAgentMiningRequest) -> No
             previous_expressions=list(request.previous_expressions or []),
             cancel_check=lambda: _raise_if_rdagent_task_cancel_requested(task_id),
         )
-        service = RDAgentFactorMiningService(_LocalRDAgentBackend())
+        service = RDAgentFactorMiningService()
 
         def _progress(progress: int, stage: str, event: dict[str, Any]) -> None:
             iteration = int(event.get("iteration") or 0)
@@ -564,6 +421,8 @@ async def _run_rdagent_mining(task_id: str, request: RDAgentMiningRequest) -> No
                 candidates=candidates,
             )
             if stage == "rdagent_feedback":
+                feedback = payload.get("feedback") or {}
+                hypothesis = payload.get("hypothesis") or {}
                 latest_round = {
                     "round_index": iteration,
                     "task_id": f"{task_id}-round-{iteration}",
@@ -571,9 +430,20 @@ async def _run_rdagent_mining(task_id: str, request: RDAgentMiningRequest) -> No
                     "all_factors": candidates,
                     "best_score": best_fitness,
                     "avg_score": avg_fitness,
+                    "hypothesis": {
+                        "statement": hypothesis.get("statement") or hypothesis.get("summary"),
+                        "reason": hypothesis.get("reason"),
+                        "research_direction": hypothesis.get("research_direction"),
+                    },
+                    "feedback": {
+                        "observations": feedback.get("observations") or feedback.get("summary"),
+                        "hypothesis_evaluation": "supported" if feedback.get("decision") else "needs_revision",
+                        "next_hypothesis": feedback.get("next_hypothesis") or feedback.get("next_goal"),
+                        "reason": feedback.get("reason"),
+                    },
                     "manual_report": {
-                        "summary": (payload.get("feedback") or {}).get("summary"),
-                        "score": (payload.get("feedback") or {}).get("score"),
+                        "summary": feedback.get("observations") or feedback.get("summary"),
+                        "score": best_fitness,
                     },
                 }
                 task["latest_round"] = latest_round
@@ -600,7 +470,7 @@ async def _run_rdagent_mining(task_id: str, request: RDAgentMiningRequest) -> No
                 "factors": list((result.get("final_round_result") or {}).get("factors") or (final_round or {}).get("candidates") or []),
             },
             "manual_report": final_round.get("manual_report") if final_round else None,
-            "continue_mining_request": final_round.get("continue_mining_request") if final_round else None,
+            "continue_mining_request": result.get("continue_mining_request") or (final_round.get("continue_mining_request") if final_round else None),
         }
         finalize_task_result(
             task,

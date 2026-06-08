@@ -1,10 +1,42 @@
 from __future__ import annotations
 
+import json
+import logging
+import math
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from backend.services.auto_factor_mining_service import AutoFactorMiningService
+from backend.services.expression_schema import FactorEvaluationResult
+from backend.services.llm_config_service import llm_config_service
+from backend.services.research_tools.rdagent_expression_contract import (
+    RDAgentExpressionFormatError,
+    normalize_rdagent_expression_for_parser,
+    rdagent_expression_contract_text,
+    validate_rdagent_expression_contract,
+)
+
+logger = logging.getLogger(__name__)
 
 MAX_RDAGENT_ITERATIONS = 8
+
+_RDAGENT_HYPOTHESIS_SYSTEM_PROMPT = """你是一个量化研究员，负责为因子挖掘提出下一轮研究假设。
+
+你必须遵守以下规则：
+1. 只返回 JSON 对象，不要输出 Markdown 或额外解释。
+2. 输出字段必须包含 statement、reason、research_direction、expected_signal。
+3. statement 必须是一条可验证的研究假设，聚焦单一优化方向。
+4. 必须显式结合上一轮反馈、已有基础因子和候选字段，避免重复。
+"""
+
+_RDAGENT_EXPERIMENT_SYSTEM_PROMPT = """你是一个量化研究规划助手，负责把研究假设转成可执行实验。
+
+你必须遵守以下规则：
+1. 只返回 JSON 对象，不要输出 Markdown 或额外解释。
+2. 输出字段必须包含 hypothesis_summary、factor_formulations、base_factors、evaluation_focus。
+3. factor_formulations 必须是 1 到 N 条单行 FactorHub 表达式。
+4. 所有表达式都必须遵守给定的 FactorHub 表达式契约。
+"""
 
 
 class RDAgentTaskCancelled(RuntimeError):
@@ -36,10 +68,16 @@ class RDAgentMiningConfig:
 
 
 class RDAgentFactorMiningService:
-    """Lightweight orchestration over a router-provided RDAgent backend."""
+    """独立的 RDAgent 因子挖掘执行器。"""
 
-    def __init__(self, backend: Any) -> None:
-        self.backend = backend
+    def __init__(
+        self,
+        *,
+        auto_mining_service: AutoFactorMiningService | None = None,
+        llm_client_factory: Callable[[dict[str, Any]], Any] | None = None,
+    ) -> None:
+        self._auto_mining_service = auto_mining_service or AutoFactorMiningService()
+        self._llm_client_factory = llm_client_factory
 
     def run(
         self,
@@ -52,10 +90,12 @@ class RDAgentFactorMiningService:
         retained_factors: list[dict[str, Any]] = []
         watchlist_factors: list[dict[str, Any]] = []
         fitness_history: dict[str, list[float]] = {"best": [], "average": []}
+        known_expressions = list(config.previous_expressions or [])
 
         total_iterations = max(1, min(int(config.max_iterations or 1), MAX_RDAGENT_ITERATIONS))
         total_stages = total_iterations * 5
         stage_count = 0
+        current_base_factors = list(config.base_factors or [])
 
         def emit(stage: str, iteration: int, payload: dict[str, Any]) -> None:
             nonlocal stage_count
@@ -65,27 +105,29 @@ class RDAgentFactorMiningService:
                 on_progress(progress, stage, {"iteration": iteration, "payload": payload})
 
         for iteration in range(1, total_iterations + 1):
-            if config.cancel_check:
-                config.cancel_check()
+            self._raise_if_cancelled(config)
 
-            hypothesis = self.backend.propose_hypothesis(config=config, rounds=rounds, iteration=iteration)
+            hypothesis = self._propose_hypothesis(
+                config=config,
+                rounds=rounds,
+                iteration=iteration,
+                current_base_factors=current_base_factors,
+            )
             emit("rdagent_hypothesis", iteration, hypothesis)
 
-            if config.cancel_check:
-                config.cancel_check()
-
-            experiment = self.backend.hypothesis_to_experiment(
+            self._raise_if_cancelled(config)
+            experiment = self._hypothesis_to_experiment(
                 config=config,
                 hypothesis=hypothesis,
                 rounds=rounds,
                 iteration=iteration,
+                current_base_factors=current_base_factors,
+                known_expressions=known_expressions,
             )
             emit("rdagent_experiment", iteration, experiment)
 
-            if config.cancel_check:
-                config.cancel_check()
-
-            coded_experiment = self.backend.code_experiment(
+            self._raise_if_cancelled(config)
+            coded_experiment = self._code_experiment(
                 config=config,
                 experiment=experiment,
                 hypothesis=hypothesis,
@@ -94,10 +136,8 @@ class RDAgentFactorMiningService:
             )
             emit("rdagent_coding", iteration, coded_experiment)
 
-            if config.cancel_check:
-                config.cancel_check()
-
-            run_result = self.backend.run_experiment(
+            self._raise_if_cancelled(config)
+            run_result = self._run_experiment(
                 config=config,
                 coded_experiment=coded_experiment,
                 hypothesis=hypothesis,
@@ -112,6 +152,8 @@ class RDAgentFactorMiningService:
                 "backtest_engine": run_result.get("backtest_engine") or "factorhub",
                 "best_score": float((run_result.get("metrics") or {}).get("score") or 0.0),
                 "avg_score": _average_score(candidates),
+                "report_metrics": (run_result.get("best_candidate") or {}).get("report_metrics") or {},
+                "backtest_summary": (run_result.get("best_candidate") or {}).get("backtest_summary") or {},
             }
             emit(
                 "rdagent_running",
@@ -124,10 +166,8 @@ class RDAgentFactorMiningService:
                 },
             )
 
-            if config.cancel_check:
-                config.cancel_check()
-
-            feedback = self.backend.generate_feedback(
+            self._raise_if_cancelled(config)
+            feedback = self._generate_feedback(
                 config=config,
                 hypothesis=hypothesis,
                 experiment=experiment,
@@ -139,6 +179,7 @@ class RDAgentFactorMiningService:
                 "rdagent_feedback",
                 iteration,
                 {
+                    "hypothesis": hypothesis,
                     "feedback": feedback,
                     "candidates": candidates,
                     "best_score": evaluation["best_score"],
@@ -157,12 +198,31 @@ class RDAgentFactorMiningService:
                 "feedback": feedback,
             }
             rounds.append(round_item)
+
             retained_factors.extend([item for item in candidates if item.get("status") == "accepted"])
             watchlist_factors.extend([item for item in candidates if item.get("status") == "watchlist"])
             fitness_history["best"].append(evaluation["best_score"])
             fitness_history["average"].append(evaluation["avg_score"])
 
+            for candidate in candidates:
+                expression = str(candidate.get("expression") or "").strip()
+                if expression:
+                    known_expressions.append(expression)
+
+            next_base_factors = list(experiment.get("base_factors") or current_base_factors)
+            if candidates:
+                next_base_factors.extend(
+                    candidate.get("name")
+                    for candidate in candidates
+                    if candidate.get("status") == "accepted" and candidate.get("name")
+                )
+            current_base_factors = _dedupe_strings(next_base_factors)
+
         final_round = rounds[-1] if rounds else {}
+        final_round_result = {
+            **(final_round.get("evaluation") or {}),
+            "factors": final_round.get("candidates") or [],
+        }
         return {
             "task_id": task_id,
             "objective": config.objective,
@@ -170,11 +230,517 @@ class RDAgentFactorMiningService:
             "retained_factors": retained_factors,
             "watchlist_factors": watchlist_factors,
             "fitness_history": fitness_history,
-            "final_round_result": {
-                **(final_round.get("evaluation") or {}),
-                "factors": final_round.get("candidates") or [],
+            "final_round_result": final_round_result,
+            "continue_mining_request": self._build_continue_request(
+                config=config,
+                final_round=final_round,
+                known_expressions=known_expressions,
+            ),
+        }
+
+    def _propose_hypothesis(
+        self,
+        *,
+        config: RDAgentMiningConfig,
+        rounds: list[dict[str, Any]],
+        iteration: int,
+        current_base_factors: list[str],
+    ) -> dict[str, Any]:
+        llm_response = self._call_llm_json(
+            system_prompt=_RDAGENT_HYPOTHESIS_SYSTEM_PROMPT,
+            user_prompt=self._build_hypothesis_prompt(
+                config=config,
+                rounds=rounds,
+                iteration=iteration,
+                current_base_factors=current_base_factors,
+            ),
+        )
+        fallback_direction = str(config.direction or "score")
+        return {
+            "statement": str(llm_response.get("statement") or f"第 {iteration} 轮围绕 {fallback_direction} 优化 {config.objective}").strip(),
+            "reason": str(llm_response.get("reason") or "结合上一轮反馈和当前基础因子继续优化。").strip(),
+            "research_direction": str(llm_response.get("research_direction") or fallback_direction).strip(),
+            "expected_signal": str(llm_response.get("expected_signal") or "提升综合分数与稳定性").strip(),
+            "base_factors": list(current_base_factors),
+            "candidate_universe": list(config.candidate_universe),
+            "previous_feedback_id": config.previous_feedback_id,
+        }
+
+    def _hypothesis_to_experiment(
+        self,
+        *,
+        config: RDAgentMiningConfig,
+        hypothesis: dict[str, Any],
+        rounds: list[dict[str, Any]],
+        iteration: int,
+        current_base_factors: list[str],
+        known_expressions: list[str],
+    ) -> dict[str, Any]:
+        factor_formulations = self._generate_factor_formulations(
+            config=config,
+            hypothesis=hypothesis,
+            rounds=rounds,
+            iteration=iteration,
+            current_base_factors=current_base_factors,
+            known_expressions=known_expressions,
+        )
+        base_factors = list(current_base_factors)
+        if not base_factors:
+            selection = self._auto_mining_service.select_factors(
+                prompt=f"{config.objective} {hypothesis.get('research_direction') or ''}".strip(),
+                max_factor_count=max(int(config.candidates_per_iteration or 1), 1),
+                candidate_limit=40,
+                selection_mode="auto",
+            )
+            base_factors = selection.get("selected_factors", [])
+        return {
+            "round_index": iteration,
+            "candidate_limit": max(int(config.candidates_per_iteration or 1), 1),
+            "base_factors": base_factors,
+            "candidate_universe": list(config.candidate_universe),
+            "hypothesis_summary": hypothesis.get("statement"),
+            "evaluation_focus": hypothesis.get("expected_signal"),
+            "factor_formulations": factor_formulations,
+        }
+
+    def _code_experiment(
+        self,
+        *,
+        config: RDAgentMiningConfig,
+        experiment: dict[str, Any],
+        hypothesis: dict[str, Any],
+        rounds: list[dict[str, Any]],
+        iteration: int,
+    ) -> dict[str, Any]:
+        coded_items: list[dict[str, Any]] = []
+        for index, expression in enumerate(experiment.get("factor_formulations") or []):
+            normalized_expression = normalize_rdagent_expression_for_parser(expression)
+            diagnostics: list[dict[str, Any]] = []
+            raw_expression = str(expression or "").strip()
+            try:
+                validate_rdagent_expression_contract(normalized_expression)
+            except RDAgentExpressionFormatError as exc:
+                diagnostics.append(
+                    {
+                        "type": "warning",
+                        "label": "契约修复",
+                        "text": str(exc),
+                    }
+                )
+                normalized_expression = normalize_rdagent_expression_for_parser(raw_expression)
+            coded_items.append(
+                {
+                    "candidate_id": f"{config.task_id}-round-{iteration}-candidate-{index + 1}",
+                    "raw_expression": raw_expression,
+                    "expression": normalized_expression,
+                    "diagnostics": diagnostics,
+                }
+            )
+        return {
+            "round_index": iteration,
+            "base_factors": list(experiment.get("base_factors") or []),
+            "candidate_universe": list(experiment.get("candidate_universe") or []),
+            "coded_items": coded_items,
+        }
+
+    def _run_experiment(
+        self,
+        *,
+        config: RDAgentMiningConfig,
+        coded_experiment: dict[str, Any],
+        hypothesis: dict[str, Any],
+        rounds: list[dict[str, Any]],
+        iteration: int,
+    ) -> dict[str, Any]:
+        stock_codes = self._auto_mining_service.data_service.get_stock_universe(config.universe, date=config.start_date)[:30]
+        if not stock_codes:
+            raise ValueError(f"股票池 {config.universe} 未返回可用股票")
+
+        candidates: list[dict[str, Any]] = []
+        evaluation_results: list[FactorEvaluationResult] = []
+        for index, coded_item in enumerate(coded_experiment.get("coded_items") or []):
+            expression = coded_item.get("expression") or ""
+            evaluation = self._auto_mining_service.evaluate_expression(
+                expression=expression,
+                prompt=str(hypothesis.get("statement") or config.objective),
+                stock_codes=stock_codes,
+                start_date=config.start_date,
+                end_date=config.end_date,
+                benchmark=config.benchmark,
+                n_groups=config.n_groups,
+                holding_period=config.holding_period,
+                direction=str(hypothesis.get("research_direction") or config.direction or "score"),
+                neutralize_industry=config.neutralize_industry,
+                neutralize_cap=config.neutralize_cap,
+            )
+            if evaluation is None:
+                continue
+            evaluation_results.append(evaluation)
+            candidate_payload = self._format_candidate_payload(
+                evaluation=evaluation,
+                coded_item=coded_item,
+                hypothesis=hypothesis,
+                iteration=iteration,
+                index=index,
+                acceptance_policy=config.acceptance_policy,
+            )
+            candidates.append(candidate_payload)
+
+        if not candidates:
+            raise ValueError("RDAgent 本轮没有产出可评估的候选表达式")
+
+        candidates.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
+        policy = dict(config.acceptance_policy or {})
+        for rank, candidate in enumerate(candidates):
+            self._apply_acceptance_policy(candidate, policy, rank)
+
+        best_candidate = candidates[0]
+        metrics = {
+            "score": float(best_candidate.get("score") or 0.0),
+            "avg_score": _average_score(candidates),
+            "accepted_count": len([candidate for candidate in candidates if candidate.get("status") == "accepted"]),
+        }
+        return {
+            "candidates": candidates,
+            "metrics": metrics,
+            "report_ref": best_candidate.get("report_url"),
+            "backtest_engine": "factorhub_rdagent_executor",
+            "best_candidate": best_candidate,
+        }
+
+    def _generate_feedback(
+        self,
+        *,
+        config: RDAgentMiningConfig,
+        hypothesis: dict[str, Any],
+        experiment: dict[str, Any],
+        run_result: dict[str, Any],
+        rounds: list[dict[str, Any]],
+        iteration: int,
+    ) -> dict[str, Any]:
+        candidates = list(run_result.get("candidates") or [])
+        best_candidate = candidates[0] if candidates else {}
+        score = float(best_candidate.get("score") or 0.0)
+        accepted_count = len([candidate for candidate in candidates if candidate.get("status") == "accepted"])
+        supported = accepted_count > 0 and score >= 60
+        next_goal = str(hypothesis.get("research_direction") or config.direction or "score")
+        if not supported and next_goal == "score":
+            next_goal = "ls_sharpe"
+        observations = (
+            f"本轮共评估 {len(candidates)} 个候选，最佳 Score 为 {score:.2f}，"
+            f"人工确认候选 {accepted_count} 个。"
+        )
+        return {
+            "observations": observations,
+            "hypothesis_evaluation": "supported" if supported else "needs_revision",
+            "next_hypothesis": f"继续围绕 {next_goal} 优化表达式稳定性与可执行性。",
+            "reason": "保留通过统一评价且满足 RDAgent 接受策略的候选，未达标则切换到更稳健的目标。",
+            "decision": supported,
+            "acceptable": supported,
+            "accepted_count": accepted_count,
+        }
+
+    def _generate_factor_formulations(
+        self,
+        *,
+        config: RDAgentMiningConfig,
+        hypothesis: dict[str, Any],
+        rounds: list[dict[str, Any]],
+        iteration: int,
+        current_base_factors: list[str],
+        known_expressions: list[str],
+    ) -> list[str]:
+        llm_response = self._call_llm_json(
+            system_prompt=_RDAGENT_EXPERIMENT_SYSTEM_PROMPT,
+            user_prompt=self._build_experiment_prompt(
+                config=config,
+                hypothesis=hypothesis,
+                rounds=rounds,
+                iteration=iteration,
+                current_base_factors=current_base_factors,
+                known_expressions=known_expressions,
+            ),
+        )
+        values = llm_response.get("factor_formulations") or llm_response.get("expressions") or []
+        if not isinstance(values, list):
+            values = []
+        normalized: list[str] = []
+        for value in values:
+            expression = normalize_rdagent_expression_for_parser(value)
+            if not expression:
+                continue
+            try:
+                validate_rdagent_expression_contract(expression)
+            except RDAgentExpressionFormatError as exc:
+                logger.info("RDAgent 表达式被契约过滤: %s", exc)
+                continue
+            normalized.append(expression)
+            if len(normalized) >= max(int(config.candidates_per_iteration or 1), 1):
+                break
+        if normalized:
+            return _dedupe_strings(normalized)
+
+        logger.info("RDAgent LLM 未返回有效表达式，使用 fallback 表达式模板。")
+        fallback_fields = list(config.candidate_universe or ["close", "volume"])
+        primary_field = fallback_fields[0]
+        secondary_field = fallback_fields[min(1, len(fallback_fields) - 1)]
+        return _dedupe_strings(
+            [
+                f"rank(ts_delta({primary_field}, 5))",
+                f"rank(ts_mean({secondary_field}, 10) / (ts_std({secondary_field}, 10) + 1e-6))",
+                "rank(ts_zscore(close, 20))",
+            ][: max(int(config.candidates_per_iteration or 1), 1)]
+        )
+
+    def _build_hypothesis_prompt(
+        self,
+        *,
+        config: RDAgentMiningConfig,
+        rounds: list[dict[str, Any]],
+        iteration: int,
+        current_base_factors: list[str],
+    ) -> str:
+        latest_feedback = rounds[-1].get("feedback") if rounds else {}
+        latest_evaluation = rounds[-1].get("evaluation") if rounds else {}
+        return (
+            f"研究目标：{config.objective}\n"
+            f"当前轮次：{iteration}\n"
+            f"优化方向：{config.direction or 'score'}\n"
+            f"基础因子：{json.dumps(current_base_factors, ensure_ascii=False)}\n"
+            f"候选字段：{json.dumps(config.candidate_universe, ensure_ascii=False)}\n"
+            f"上一轮反馈：{json.dumps(latest_feedback or {}, ensure_ascii=False)}\n"
+            f"上一轮评估：{json.dumps(latest_evaluation or {}, ensure_ascii=False)}\n"
+            "请输出下一轮 RDAgent 因子研究假设。"
+        )
+
+    def _build_experiment_prompt(
+        self,
+        *,
+        config: RDAgentMiningConfig,
+        hypothesis: dict[str, Any],
+        rounds: list[dict[str, Any]],
+        iteration: int,
+        current_base_factors: list[str],
+        known_expressions: list[str],
+    ) -> str:
+        return (
+            f"研究目标：{config.objective}\n"
+            f"当前轮次：{iteration}\n"
+            f"研究假设：{json.dumps(hypothesis, ensure_ascii=False)}\n"
+            f"基础因子：{json.dumps(current_base_factors, ensure_ascii=False)}\n"
+            f"候选字段：{json.dumps(config.candidate_universe, ensure_ascii=False)}\n"
+            f"历史表达式（禁止重复）：{json.dumps(known_expressions[-20:], ensure_ascii=False)}\n"
+            f"表达式契约：{rdagent_expression_contract_text()}\n"
+            f"需要生成 {max(int(config.candidates_per_iteration or 1), 1)} 条候选表达式。"
+        )
+
+    def _call_llm_json(self, *, system_prompt: str, user_prompt: str) -> dict[str, Any]:
+        runtime_config = llm_config_service.get_runtime_config()
+        if not runtime_config.get("api_key"):
+            return {}
+
+        client = self._create_llm_client(runtime_config)
+        try:
+            response = client.chat.completions.create(
+                model=runtime_config.get("model") or "deepseek-chat",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.3,
+                max_tokens=1600,
+            )
+        except Exception as exc:
+            logger.warning("RDAgent LLM 调用失败，转用 fallback：%s", exc)
+            return {}
+
+        content = (response.choices[0].message.content or "").strip()
+        content = content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        try:
+            parsed = json.loads(content)
+        except Exception:
+            logger.warning("RDAgent LLM 返回了无法解析的 JSON：%s", content[:200])
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _create_llm_client(self, runtime_config: dict[str, Any]) -> Any:
+        if self._llm_client_factory is not None:
+            return self._llm_client_factory(runtime_config)
+        from openai import OpenAI
+
+        return OpenAI(
+            api_key=runtime_config["api_key"],
+            base_url=runtime_config.get("base_url") or "https://api.deepseek.com/v1",
+        )
+
+    def _format_candidate_payload(
+        self,
+        *,
+        evaluation: FactorEvaluationResult,
+        coded_item: dict[str, Any],
+        hypothesis: dict[str, Any],
+        iteration: int,
+        index: int,
+        acceptance_policy: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        task_details = {
+            "expression": evaluation.expression,
+            "raw_expression": coded_item.get("raw_expression"),
+            "report_url": evaluation.report_url,
+            "report_metrics": evaluation.report_metrics,
+            "backtest_summary": evaluation.backtest_summary,
+            "wq_brain": evaluation.wq_brain,
+            "component_scores": evaluation.component_scores,
+            "anti_overfit": evaluation.anti_overfit,
+            "interpretation": evaluation.interpretation,
+            "scoring": {
+                "score": evaluation.score,
+                "grade": evaluation.grade,
+                "component_scores": evaluation.component_scores,
+                "wq_fitness": evaluation.wq_brain.get("wq_fitness"),
+            },
+            "rdagent": {
+                "raw_expression": coded_item.get("raw_expression"),
+                "adapter_normalized": coded_item.get("raw_expression") != evaluation.expression,
+                "candidate_score": {
+                    "score": evaluation.score,
+                    "report_metrics": evaluation.report_metrics,
+                    "backtest_summary": evaluation.backtest_summary,
+                    "report_url": evaluation.report_url,
+                    "rank_ic": evaluation.backtest_summary.get("rank_ic_mean"),
+                    "sharpe": evaluation.report_metrics.get("sharpe", evaluation.backtest_summary.get("long_short_sharpe")),
+                    "valid_coverage": 1.0,
+                    "max_correlation_with_sota": 0.0,
+                },
+                "hypothesis": hypothesis,
+                "acceptance_policy": acceptance_policy or {},
+            },
+            "diagnostics": list(evaluation.diagnostics or []) + list(coded_item.get("diagnostics") or []),
+            "round_evaluation": {
+                "recommended_goal": hypothesis.get("expected_signal"),
+                "primary_problem": hypothesis.get("reason"),
+                "metric_snapshot": {
+                    "score": evaluation.score,
+                    "report_sharpe": evaluation.report_metrics.get("sharpe"),
+                    "ls_sharpe": evaluation.backtest_summary.get("long_short_sharpe"),
+                    "rank_ic": evaluation.backtest_summary.get("rank_ic_mean"),
+                    "wq_fitness": evaluation.backtest_summary.get("wq_fitness"),
+                },
             },
         }
+        return {
+            "candidate_id": coded_item.get("candidate_id"),
+            "name": f"RDAgent_Factor_{iteration}_{index + 1}",
+            "expression": evaluation.expression,
+            "raw_expression": coded_item.get("raw_expression"),
+            "score": evaluation.score,
+            "grade": evaluation.grade,
+            "fitness": evaluation.wq_brain.get("wq_fitness"),
+            "ic": evaluation.backtest_summary.get("ic_mean"),
+            "ir": evaluation.backtest_summary.get("ic_ir"),
+            "rank_ic": evaluation.backtest_summary.get("rank_ic_mean"),
+            "sharpe": evaluation.backtest_summary.get("long_short_sharpe"),
+            "status": "watchlist",
+            "source": "factorhub_rdagent_mining",
+            "engine_type": evaluation.engine_type,
+            "dialect": evaluation.dialect,
+            "canonical_expression": evaluation.canonical_expression,
+            "canonical_ast": evaluation.canonical_ast,
+            "report_url": evaluation.report_url,
+            "report_metrics": evaluation.report_metrics,
+            "backtest_summary": evaluation.backtest_summary,
+            "component_scores": evaluation.component_scores,
+            "anti_overfit": evaluation.anti_overfit,
+            "wq_brain": evaluation.wq_brain,
+            "interpretation": evaluation.interpretation,
+            "task_details": task_details,
+            "quantgpt_task_details": task_details,
+            "automation_meta": {
+                "round_index": iteration,
+                "source": "rdagent",
+            },
+            "execution_meta": evaluation.execution_meta,
+        }
+
+    def _apply_acceptance_policy(self, candidate: dict[str, Any], policy: dict[str, Any], rank: int) -> None:
+        reasons: list[str] = []
+        backtest_summary = candidate.get("backtest_summary") or {}
+        report_metrics = candidate.get("report_metrics") or {}
+
+        min_rank_ic = _safe_float(policy.get("min_rank_ic"), 0.0)
+        rank_ic = _safe_float(backtest_summary.get("rank_ic_mean"))
+        if rank_ic < min_rank_ic:
+            reasons.append(f"rank_ic {rank_ic:.4f} 低于阈值 {min_rank_ic:.4f}")
+
+        min_return = _safe_float(policy.get("min_annualized_return_delta"), 0.0)
+        annual_return = _safe_float(backtest_summary.get("long_short_annual"))
+        if annual_return < min_return:
+            reasons.append(f"annualized_return {annual_return:.4f} 低于阈值 {min_return:.4f}")
+
+        max_drawdown = _safe_float(policy.get("max_drawdown_regression"), 0.05)
+        drawdown = abs(_safe_float(report_metrics.get("max_drawdown")))
+        if drawdown > max_drawdown:
+            reasons.append(f"max_drawdown {drawdown:.4f} 高于阈值 {max_drawdown:.4f}")
+
+        coverage_floor = _safe_float(policy.get("min_valid_coverage"), 0.8)
+        coverage = 1.0
+        if coverage < coverage_floor:
+            reasons.append(f"valid_coverage {coverage:.4f} 低于阈值 {coverage_floor:.4f}")
+
+        max_corr = _safe_float(policy.get("max_correlation_with_sota"), 0.99)
+        correlation = 0.0
+        if correlation > max_corr:
+            reasons.append(f"max_correlation_with_sota {correlation:.4f} 高于阈值 {max_corr:.4f}")
+
+        status = "accepted" if not reasons and rank == 0 else "watchlist"
+        if reasons and rank > 0:
+            status = "rejected"
+        candidate["status"] = status
+        rdagent_details = candidate.setdefault("task_details", {}).setdefault("rdagent", {})
+        rdagent_details["policy_failure_reasons"] = reasons
+        candidate["policy_diagnostics"] = {"failure_reasons": reasons}
+        candidate["task_details"]["rdagent"]["candidate_score"]["valid_coverage"] = coverage
+        candidate["task_details"]["rdagent"]["candidate_score"]["max_correlation_with_sota"] = correlation
+
+    def _build_continue_request(
+        self,
+        *,
+        config: RDAgentMiningConfig,
+        final_round: dict[str, Any],
+        known_expressions: list[str],
+    ) -> dict[str, Any]:
+        feedback = final_round.get("feedback") or {}
+        experiment = final_round.get("experiment") or {}
+        payload = {
+            "objective": feedback.get("next_hypothesis") or config.objective,
+            "candidate_universe": list(config.candidate_universe),
+            "base_factors": list(experiment.get("base_factors") or config.base_factors),
+            "start_date": config.start_date,
+            "end_date": config.end_date,
+            "universe": config.universe,
+            "benchmark": config.benchmark,
+            "max_iterations": config.max_iterations,
+            "candidates_per_iteration": config.candidates_per_iteration,
+            "n_groups": config.n_groups,
+            "holding_period": config.holding_period,
+            "direction": feedback.get("next_hypothesis") and config.direction or config.direction,
+            "neutralize_industry": config.neutralize_industry,
+            "neutralize_cap": config.neutralize_cap,
+            "continuation_of": config.task_id,
+            "previous_feedback_id": config.previous_feedback_id or f"{config.task_id}-feedback-{final_round.get('round_index', 0)}",
+            "previous_expressions": _dedupe_strings(known_expressions),
+            "acceptance_policy": dict(config.acceptance_policy or {}),
+        }
+        return {
+            "objective": payload["objective"],
+            "summary": feedback.get("reason") or "根据上一轮反馈继续优化。",
+            "payload": payload,
+        }
+
+    @staticmethod
+    def _raise_if_cancelled(config: RDAgentMiningConfig) -> None:
+        if config.cancel_check is not None:
+            config.cancel_check()
 
 
 def _average_score(candidates: list[dict[str, Any]]) -> float:
@@ -182,3 +748,28 @@ def _average_score(candidates: list[dict[str, Any]]) -> float:
     if not scores:
         return 0.0
     return sum(scores) / len(scores)
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        numeric = float(value)
+    except Exception:
+        return default
+    if math.isnan(numeric) or math.isinf(numeric):
+        return default
+    return numeric
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        key = text.lower().replace(" ", "")
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+    return result
