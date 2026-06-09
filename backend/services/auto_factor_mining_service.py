@@ -111,6 +111,13 @@ def _normalize_expression(value: str) -> str:
     return re.sub(r"\s+", "", str(value or "").strip().lower())
 
 
+def _clip_text(value: Any, limit: int = 160) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[: max(limit - 1, 0)].rstrip()}…"
+
+
 def _extract_text_from_llm_message_content(content: Any) -> str:
     if isinstance(content, str):
         return content.strip()
@@ -730,6 +737,105 @@ class AutoFactorMiningService:
         )
         selection["continuation_context"] = context
         return selection
+
+    def _build_campaign_round_prompt(
+        self,
+        *,
+        base_prompt: str,
+        continuation_context: dict[str, Any] | None,
+        direction: str | None,
+        round_index: int,
+    ) -> str:
+        if not continuation_context or round_index <= 1:
+            return base_prompt
+
+        primary_problem = _clip_text(continuation_context.get("primary_problem") or "综合稳定性不足", 80)
+        secondary_problem = _clip_text(continuation_context.get("secondary_problem") or "", 80)
+        recommended_goal = str(
+            continuation_context.get("recommended_goal")
+            or direction
+            or "score"
+        ).strip()
+        suggested_actions = [
+            _clip_text(item, 80)
+            for item in list(continuation_context.get("suggested_actions") or [])
+            if str(item or "").strip()
+        ][:2]
+        preferred_keywords = [
+            str(item).strip()
+            for item in list(continuation_context.get("preferred_keywords") or [])
+            if str(item or "").strip()
+        ][:6]
+        avoid_keywords = [
+            str(item).strip()
+            for item in list(continuation_context.get("avoid_keywords") or [])
+            if str(item or "").strip()
+        ][:6]
+        metric_snapshot = continuation_context.get("metric_snapshot") or {}
+        metric_parts = []
+        if metric_snapshot.get("score") is not None:
+            metric_parts.append(f"score={_safe_float(metric_snapshot.get('score')):.1f}")
+        if metric_snapshot.get("ls_sharpe") is not None:
+            metric_parts.append(f"ls_sharpe={_safe_float(metric_snapshot.get('ls_sharpe')):.2f}")
+        if metric_snapshot.get("rank_ic") is not None:
+            metric_parts.append(f"rank_ic={_safe_float(metric_snapshot.get('rank_ic')):.4f}")
+        if metric_snapshot.get("turnover") is not None:
+            metric_parts.append(f"turnover={_safe_float(metric_snapshot.get('turnover')):.2f}")
+
+        prompt_lines = [
+            str(base_prompt or "").strip(),
+            "",
+            f"连续探索第 {round_index} 轮补充要求：",
+            f"1. 本轮唯一主目标是 {recommended_goal}，优先修复“{primary_problem}”。",
+            "2. 保留上一轮有效结构，只做小步、可解释的增量优化，不要一次性大改多个方向。",
+        ]
+        if secondary_problem:
+            prompt_lines.append(f"3. 同时避免明显恶化“{secondary_problem}”。")
+        if metric_parts:
+            prompt_lines.append(f"当前基线指标：{', '.join(metric_parts)}。")
+        if suggested_actions:
+            prompt_lines.append(f"优先动作：{'；'.join(suggested_actions)}。")
+        if preferred_keywords:
+            prompt_lines.append(f"优先语义：{', '.join(preferred_keywords)}。")
+        if avoid_keywords:
+            prompt_lines.append(f"避免语义：{', '.join(avoid_keywords)}。")
+        prompt_lines.append("请优先生成中等复杂度、抗噪声、语义互补的表达式，避免只改窗口或堆砌重复结构。")
+        return "\n".join(line for line in prompt_lines if line)
+
+    def _score_retention_candidate(
+        self,
+        factor: dict[str, Any],
+        retention_filter: dict[str, Any],
+    ) -> float:
+        score = _safe_float(factor.get("score"))
+        backtest_summary = factor.get("backtest_summary", {}) or {}
+        wq_brain = factor.get("wq_brain", {}) or {}
+        composite = score
+        composite += _safe_float(backtest_summary.get("long_short_sharpe")) * 12
+        composite += _safe_float(backtest_summary.get("long_short_annual")) * 80
+        composite += _safe_float(backtest_summary.get("rank_ic_mean")) * 600
+        composite += _safe_float(wq_brain.get("wq_returns")) * 60
+        composite += _safe_float(wq_brain.get("wq_fitness")) * 8
+        composite -= max(_safe_float(backtest_summary.get("turnover")) - 0.45, 0.0) * 20
+
+        penalties = 0.0
+        thresholds = {
+            "score_min": ("score", factor.get("score"), 1.0),
+            "ls_sharpe_min": ("ls_sharpe", backtest_summary.get("long_short_sharpe"), 8.0),
+            "ls_return_min": ("ls_return", backtest_summary.get("long_short_annual"), 20.0),
+            "wq_return_min": ("wq_return", wq_brain.get("wq_returns"), 20.0),
+        }
+        for key, (_, value, weight) in thresholds.items():
+            target = retention_filter.get(key)
+            if target is None:
+                continue
+            penalties += max(_safe_float(target) - _safe_float(value), 0.0) * weight
+
+        ratings = [str(item) for item in retention_filter.get("wq_ratings", []) if item]
+        if ratings and str(wq_brain.get("wq_rating", "")) not in ratings:
+            penalties += 6.0
+
+        return composite - penalties
 
     def _build_continuation_selection_hints(
         self,
@@ -2123,6 +2229,13 @@ class AutoFactorMiningService:
                         }
                     )
 
+            current_prompt = self._build_campaign_round_prompt(
+                base_prompt=prompt,
+                continuation_context=continuation_context,
+                direction=direction,
+                round_index=round_index,
+            )
+
             try:
                 round_result = self.run_auto_mining(
                     prompt=current_prompt,
@@ -2458,7 +2571,12 @@ class AutoFactorMiningService:
                     current_base_factors = _dedupe_preserve_order(next_parent_base_factors + candidate_factors)
             elif parent_selection_strategy != "latest_round":
                 current_base_factors = list(parent_base_factors_for_next_round)
-            current_prompt = prompt
+            current_prompt = self._build_campaign_round_prompt(
+                base_prompt=prompt,
+                continuation_context=selection_context,
+                direction=direction,
+                round_index=round_index + 1,
+            )
 
         fitness_history = {
             "best": [round(max(aggregate_best[: idx + 1]), 4) for idx in range(len(aggregate_best))],
@@ -2525,17 +2643,26 @@ class AutoFactorMiningService:
                 >= _safe_float(wq_return_min)
             )
 
+        ranked_factors = sorted(
+            list(factors),
+            key=lambda factor: self._score_retention_candidate(factor, retention_filter),
+            reverse=True,
+        )
+
         if not checks:
-            return list(factors[: max(min(len(factors), 3), 1)])
+            return list(ranked_factors[: max(min(len(ranked_factors), 3), 1)])
 
         match_mode = str(retention_filter.get("match_mode") or "all").lower()
         retained: list[dict[str, Any]] = []
-        for factor in factors:
+        for factor in ranked_factors:
             results = [check(factor) for check in checks]
             if (match_mode == "any" and any(results)) or (match_mode != "any" and all(results)):
                 retained.append(factor)
 
-        return retained
+        if retained:
+            return retained
+
+        return list(ranked_factors[: max(min(len(ranked_factors), 2), 1)])
 
     def evaluate_expression(
         self,

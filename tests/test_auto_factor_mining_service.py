@@ -240,11 +240,38 @@ def test_filter_retained_factors_supports_match_modes() -> None:
     assert retained_any == factors
 
 
+def test_filter_retained_factors_falls_back_to_best_ranked_candidates_when_thresholds_miss() -> None:
+    service = AutoFactorMiningService()
+    factors = [
+        {
+            "name": "BestNearMiss",
+            "score": 79,
+            "backtest_summary": {"long_short_sharpe": 0.95, "long_short_annual": 0.17, "rank_ic_mean": 0.028, "turnover": 0.32},
+            "wq_brain": {"wq_rating": "B", "wq_returns": 0.15, "wq_fitness": 1.1},
+        },
+        {
+            "name": "WeakerNearMiss",
+            "score": 70,
+            "backtest_summary": {"long_short_sharpe": 0.75, "long_short_annual": 0.09, "rank_ic_mean": 0.012, "turnover": 0.58},
+            "wq_brain": {"wq_rating": "C", "wq_returns": 0.08, "wq_fitness": 0.6},
+        },
+    ]
+
+    retained = service.filter_retained_factors(
+        factors,
+        {"match_mode": "all", "score_min": 85, "ls_sharpe_min": 1.2, "ls_return_min": 0.2},
+    )
+
+    assert [item["name"] for item in retained] == ["BestNearMiss", "WeakerNearMiss"]
+
+
 def test_run_auto_campaign_returns_real_rounds(monkeypatch) -> None:
     service = AutoFactorMiningService()
     continuation_calls: list[dict[str, object]] = []
+    prompts_seen: list[str] = []
 
     def fake_run_auto_mining(**kwargs):
+        prompts_seen.append(kwargs["prompt"])
         base_factors = kwargs["base_factors"]
         round_index = 1 if "ExtraFactor" not in base_factors else 2
         best_score = 60 + round_index * 10
@@ -361,6 +388,11 @@ def test_run_auto_campaign_returns_real_rounds(monkeypatch) -> None:
     assert result["rounds"][1]["factor_usage"]["used_base_factors"] == ["Alpha1", "ExtraFactor"]
     assert result["rounds"][1]["factor_usage"]["used_new_factors"] == ["ExtraFactor"]
     assert result["rounds"][1]["factor_usage"]["unused_new_factors"] == []
+    assert prompts_seen[0] == "提升综合分数"
+    assert "连续探索第 2 轮补充要求" in prompts_seen[1]
+    assert "本轮唯一主目标是 score" in prompts_seen[1]
+    assert "优先动作：" in prompts_seen[1]
+    assert "第 1 轮动作" in prompts_seen[1]
 
 
 def test_run_auto_campaign_progress_uses_current_round_snapshot(monkeypatch) -> None:

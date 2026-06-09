@@ -146,6 +146,9 @@ const getFactorDetailKey = (factor: AutoFactor, index: number) =>
 const getFactorClientKey = (factor: Partial<AutoFactor> | null | undefined, index: number) =>
   `${factor?.task_id || factor?.name || "factor"}::${factor?.expression || "expr"}::${index}`;
 
+const LEGACY_AUTO_PROMPT = "基于已导入因子做自动因子挖掘，优先生成可解释、稳定的量价复合因子";
+const OPTIMIZED_AUTO_PROMPT = "基于已导入因子做自动挖掘，优先保留已验证的有效结构，围绕单一主目标生成中等复杂度、可解释、低噪声的量价复合因子；避免只改窗口参数，优先提升 rankIC、L/S Sharpe、收益稳定性与 WQ Fitness 的平衡。";
+
 interface MiningStatus {
   task_id: string;
   status: "pending" | "running" | "completed" | "failed" | "cancelled";
@@ -279,6 +282,14 @@ interface CampaignReferenceInfo {
   finalRoundBaseFactors: string[];
   bestParentTaskId?: string;
   bestParentBaseFactors: string[];
+}
+
+interface CampaignRoundDetailView {
+  roundIndex: number;
+  taskId: string;
+  title: string;
+  description: string;
+  factors: AutoFactor[];
 }
 
 interface RDAgentTraceRound {
@@ -733,6 +744,25 @@ const getAutoCampaignReferenceInfo = (result: AutoCampaignResult | null | undefi
   };
 };
 
+const getAutoCampaignRoundDetailViews = (result: AutoCampaignResult | null | undefined): CampaignRoundDetailView[] => {
+  if (!result?.rounds?.length) return [];
+  const rounds = result.rounds.filter((round) => (round.all_factors || round.retained_factors || []).length > 0);
+  if (!rounds.length) return [];
+  const pickedRounds = rounds.slice(0, Math.min(2, rounds.length));
+  return pickedRounds.map((round) => {
+    const factors = ((round.retained_factors && round.retained_factors.length)
+      ? round.retained_factors
+      : round.all_factors) || [];
+    return {
+      roundIndex: round.round_index,
+      taskId: round.task_id,
+      title: `第 ${round.round_index} 轮因子详情`,
+      description: round.selection_rationale || `展示第 ${round.round_index} 轮真实产出的候选因子与指标细节。`,
+      factors,
+    };
+  });
+};
+
 const loadPersistedRDAgentTaskState = (): PersistedRDAgentTaskState | null => {
   if (typeof window === "undefined") return null;
   try {
@@ -1099,7 +1129,7 @@ const FactorMining: React.FC = () => {
     });
 
     const defaultAutoValues = {
-      prompt: "基于已导入因子做自动因子挖掘，优先生成可解释、稳定的量价复合因子",
+      prompt: OPTIMIZED_AUTO_PROMPT,
       dateRange: [startDate, endDate],
       universe: "hs300",
       benchmark: "hs300",
@@ -1117,8 +1147,10 @@ const FactorMining: React.FC = () => {
         const raw = window.localStorage.getItem(AUTO_MINING_FORM_STORAGE_KEY);
         if (raw) {
           const parsed = JSON.parse(raw);
+          const persistedPrompt = typeof parsed?.prompt === "string" ? parsed.prompt.trim() : "";
           persistedAutoValues = {
             ...parsed,
+            prompt: persistedPrompt === LEGACY_AUTO_PROMPT ? OPTIMIZED_AUTO_PROMPT : parsed?.prompt,
             dateRange:
               Array.isArray(parsed?.dateRange) && parsed.dateRange.length === 2
                 ? [dayjs(parsed.dateRange[0]), dayjs(parsed.dateRange[1])]
@@ -3402,6 +3434,109 @@ const FactorMining: React.FC = () => {
   );
 
   const renderStatusCard = () => {
+    const renderAutoLikeFactorCards = (
+      factors: AutoFactor[],
+      options?: {
+        roundTag?: string;
+        emptyText?: string;
+      },
+    ) => {
+      if (!factors?.length) {
+        return <Alert message={options?.emptyText || "没有可展示的因子"} type="info" showIcon />;
+      }
+      return (
+        <div className="factors-list">
+          {factors.map((factor: any, index: number) => {
+            const meta = factor.automation_meta || {};
+            const detailKey = getFactorDetailKey(factor, index);
+            const clientKey = getFactorClientKey(factor, index);
+            const detailsExpanded = expandedDetailsKey === detailKey;
+            const factorTaskDetails = buildFactorTaskDetailsForDashboard(factor);
+            const factorReportUrl = factorTaskDetails?.report_url || factor.report_url;
+            const factorSubmissionStatus = factor.wq_brain?.submission_status || factor.wq_brain?.platform_status || "UNSUBMITTED";
+            return (
+              <Card key={`${factor.expression || factor.name || index}-${index}`} className="factor-card" size="small">
+                <div className="factor-header">
+                  <div className="factor-info">
+                    <Space wrap>
+                      <Tag color="blue">Top {index + 1}</Tag>
+                      <Tag color="cyan">{options?.roundTag || `第 ${meta.round_index || "-"} 轮`}</Tag>
+                      {activeTab === "rdagent" ? <Tag color="gold">待人工确认</Tag> : null}
+                      <Tag color={factorSubmissionStatus === "ACTIVE" ? "green" : factorSubmissionStatus === "SC_FAIL" ? "red" : factorSubmissionStatus === "SC_PENDING" ? "gold" : "default"}>
+                        {factorSubmissionStatus}
+                      </Tag>
+                      <span className="factor-name">{factor.name || `Factor_${index + 1}`}</span>
+                      {factor.grade ? <Tag color="purple">{factor.grade}</Tag> : null}
+                    </Space>
+                    <div className="factor-expression">{factor.expression}</div>
+                  </div>
+                  <div className="factor-stats">
+                    <div className="stat-row"><span className="stat-label">Score:</span><span className="stat-value positive">{factor.score?.toFixed?.(1) || "0.0"}</span></div>
+                    <div className="stat-row"><span className="stat-label">Sharpe:</span><span className="stat-value">{factor.backtest_summary?.long_short_sharpe?.toFixed?.(2) || "-"}</span></div>
+                    <div className="stat-row"><span className="stat-label">WQ Rating:</span><span className="stat-value">{factor.wq_brain?.wq_rating || "未同步"}</span></div>
+                  </div>
+                </div>
+                <div className="factor-actions">
+                  <Space wrap>
+                    <Button type="primary" size="small" icon={<SaveOutlined />} onClick={() => saveFactor(factor, index)}>
+                      {activeTab === "rdagent" ? "确认并保存" : "保存到因子库"}
+                    </Button>
+                    <Button
+                      size="small"
+                      loading={!!wqSubmittingKeys[clientKey]}
+                      onClick={() => void handleSubmitFactorToWQBrain(factor, index)}
+                    >
+                      保存并提交 WQ
+                    </Button>
+                    <Button
+                      size="small"
+                      disabled={!factor.factor_id}
+                      loading={!!wqSyncingKeys[clientKey]}
+                      onClick={() => void handleSyncFactorWQState(factor, index)}
+                    >
+                      同步 WQ 状态
+                    </Button>
+                    <Button size="small" icon={<SettingOutlined />} onClick={() => toggleDetailsPreview(factor, index)}>
+                      {detailsExpanded ? "收起详情" : "展开详情"}
+                    </Button>
+                    {factorReportUrl ? (
+                      <Button size="small" icon={<BarChartOutlined />} onClick={() => toggleReportPreview(factorReportUrl)}>
+                        {expandedReportUrl === resolveReportUrl(factorReportUrl) ? "收起报告" : "查看报告"}
+                      </Button>
+                    ) : null}
+                  </Space>
+                </div>
+                {detailsExpanded ? (
+                  <div id={`factor-details-${encodeURIComponent(detailKey)}`} style={{ marginTop: 16 }}>
+                    <QuantTaskDetailsPanel
+                      taskId={meta.round_task_id || factor.task_id}
+                      source={factor.source}
+                      details={factorTaskDetails}
+                    />
+                  </div>
+                ) : null}
+                {factorReportUrl && expandedReportUrl === resolveReportUrl(factorReportUrl) ? (
+                  <div id={`report-preview-${encodeURIComponent(resolveReportUrl(factorReportUrl))}`} className="report-preview-shell" style={{ marginTop: 16 }}>
+                    <div style={{ padding: "10px 12px", borderBottom: "1px solid #e5e7eb", fontSize: 13, color: "#64748b" }}>
+                      报告预览
+                    </div>
+                    <div className="report-preview-frame-wrap">
+                      <iframe
+                        src={resolveReportUrl(factorReportUrl)}
+                        title={`retained-report-preview-${index}`}
+                        className="report-preview-frame"
+                        style={{ height: 720 }}
+                      />
+                    </div>
+                  </div>
+                ) : null}
+              </Card>
+            );
+          })}
+        </div>
+      );
+    };
+
     const renderReadyState = (title: string, description: string) => (
       <div style={{ padding: 48, textAlign: "center" }}>
         <RocketOutlined style={{ fontSize: 48, color: "#94a3b8", marginBottom: 16 }} />
@@ -3608,6 +3743,7 @@ const FactorMining: React.FC = () => {
         const autoCampaignDisplayedFactors = isRDAgentResult
           ? (autoCampaignResult.retained_factors || [])
           : getAutoCampaignDisplayedFactors(autoCampaignResult);
+        const campaignRoundDetailViews = isRDAgentResult ? [] : getAutoCampaignRoundDetailViews(autoCampaignResult);
         return (
           <div className="result-shell">
             <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
@@ -3625,7 +3761,7 @@ const FactorMining: React.FC = () => {
             <ResultSection
               kicker={isRDAgentResult ? "运行概览" : "结果概览"}
               title={activeTab === "rdagent" ? "RDAgent 研究结果" : "自动化研究结果"}
-              description={isRDAgentResult ? "先看当前轮次和候选结论，完整证据放在下面的标签页里。" : "这里先展示最终产出和研究曲线，轮次细节按需展开。"}
+              description={isRDAgentResult ? "先看当前轮次和候选结论，完整证据放在下面的标签页里。" : "先看最终产出和研究曲线，轮次细节放在下方。"}
             >
               <div className="chart-section" style={{ marginBottom: 0 }}>
                 <h4 className="chart-title">{activeTab === "rdagent" ? "RDAgent 完整研究曲线" : "自动化完整研究曲线"}</h4>
@@ -3676,7 +3812,7 @@ const FactorMining: React.FC = () => {
               <ResultSection
                 kicker="过程回放"
                 title="每轮摘要"
-                description="保留轮次演进信息，但收成面向操作的摘要卡，不让说明性文字压住主界面。"
+                description="只保留做决策需要的轮次摘要。"
               >
                 <div className="factors-list">
                   {autoCampaignResult.rounds.map((round, roundIndex) => {
@@ -3835,6 +3971,31 @@ const FactorMining: React.FC = () => {
               </ResultSection>
             ) : null}
 
+            {!isRDAgentResult && campaignRoundDetailViews.length ? (
+              <ResultSection
+                kicker="轮次详情"
+                title="前两轮因子详情"
+                description="这里直接展开前两轮真实候选，方便对比连续探索是怎么演进的。"
+              >
+                <Tabs
+                  className="result-detail-tabs"
+                  items={campaignRoundDetailViews.map((view) => ({
+                    key: view.taskId,
+                    label: `第 ${view.roundIndex} 轮`,
+                    children: (
+                      <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                        <Alert type="info" showIcon message={view.title} description={view.description} />
+                        {renderAutoLikeFactorCards(view.factors, {
+                          roundTag: `第 ${view.roundIndex} 轮`,
+                          emptyText: `第 ${view.roundIndex} 轮暂无可展示因子`,
+                        })}
+                      </Space>
+                    ),
+                  }))}
+                />
+              </ResultSection>
+            ) : null}
+
             <ResultSection
               kicker={isRDAgentResult ? "人工确认区" : "最终产出"}
               title={isRDAgentResult ? "候选因子（需人工确认）" : (autoWorkflowMode === "campaign" ? "最终产出（最后一轮）" : "保留的因子")}
@@ -3842,7 +4003,7 @@ const FactorMining: React.FC = () => {
                 isRDAgentResult
                   ? "这里只放需要你判断和保存的候选，操作优先，证据详情按需展开。"
                   : (autoWorkflowMode === "campaign"
-                      ? "这里固定展示连续探索最后一轮的真实产出；最佳 parent 只作为参考，不再混入当前结果。"
+                      ? "这里只展示最后一轮真实产出；最佳 parent 只保留为参考。"
                       : "最终保留下来的因子集中在这一组，报告和任务详情都按需展开。")
               }
               extra={isRDAgentResult ? <Tag color="gold">配置页视图</Tag> : <Tag color="blue">结果清单</Tag>}
@@ -3875,95 +4036,7 @@ const FactorMining: React.FC = () => {
               {!autoCampaignDisplayedFactors?.length ? (
                 <Alert message={isRDAgentResult ? "本轮没有候选因子达到待确认条件" : "没有因子满足当前筛选条件"} type="info" showIcon />
               ) : (
-                <div className="factors-list">
-                  {autoCampaignDisplayedFactors.map((factor: any, index: number) => {
-                    const meta = factor.automation_meta || {};
-                    const detailKey = getFactorDetailKey(factor, index);
-                    const clientKey = getFactorClientKey(factor, index);
-                    const detailsExpanded = expandedDetailsKey === detailKey;
-                    const factorTaskDetails = buildFactorTaskDetailsForDashboard(factor);
-                    const factorReportUrl = factorTaskDetails?.report_url || factor.report_url;
-                    const factorSubmissionStatus = factor.wq_brain?.submission_status || factor.wq_brain?.platform_status || "UNSUBMITTED";
-                    return (
-                      <Card key={`${factor.expression || factor.name || index}-${index}`} className="factor-card" size="small">
-                        <div className="factor-header">
-                          <div className="factor-info">
-                            <Space wrap>
-                              <Tag color="blue">Top {index + 1}</Tag>
-                              <Tag color="cyan">第 {meta.round_index || "-"} 轮</Tag>
-                              {isRDAgentResult ? <Tag color="gold">待人工确认</Tag> : null}
-                              <Tag color={factorSubmissionStatus === "ACTIVE" ? "green" : factorSubmissionStatus === "SC_FAIL" ? "red" : factorSubmissionStatus === "SC_PENDING" ? "gold" : "default"}>
-                                {factorSubmissionStatus}
-                              </Tag>
-                              <span className="factor-name">{factor.name || `Factor_${index + 1}`}</span>
-                              {factor.grade ? <Tag color="purple">{factor.grade}</Tag> : null}
-                            </Space>
-                            <div className="factor-expression">{factor.expression}</div>
-                          </div>
-                          <div className="factor-stats">
-                            <div className="stat-row"><span className="stat-label">Score:</span><span className="stat-value positive">{factor.score?.toFixed?.(1) || "0.0"}</span></div>
-                            <div className="stat-row"><span className="stat-label">Sharpe:</span><span className="stat-value">{factor.backtest_summary?.long_short_sharpe?.toFixed?.(2) || "-"}</span></div>
-                            <div className="stat-row"><span className="stat-label">WQ Rating:</span><span className="stat-value">{factor.wq_brain?.wq_rating || "未同步"}</span></div>
-                          </div>
-                        </div>
-                        <div className="factor-actions">
-                          <Space wrap>
-                            <Button type="primary" size="small" icon={<SaveOutlined />} onClick={() => saveFactor(factor, index)}>
-                              {isRDAgentResult ? "确认并保存" : "保存到因子库"}
-                            </Button>
-                            <Button
-                              size="small"
-                              loading={!!wqSubmittingKeys[clientKey]}
-                              onClick={() => void handleSubmitFactorToWQBrain(factor, index)}
-                            >
-                              保存并提交 WQ
-                            </Button>
-                            <Button
-                              size="small"
-                              disabled={!factor.factor_id}
-                              loading={!!wqSyncingKeys[clientKey]}
-                              onClick={() => void handleSyncFactorWQState(factor, index)}
-                            >
-                              同步 WQ 状态
-                            </Button>
-                            <Button size="small" icon={<SettingOutlined />} onClick={() => toggleDetailsPreview(factor, index)}>
-                              {detailsExpanded ? "收起详情" : "展开详情"}
-                            </Button>
-                            {factorReportUrl ? (
-                              <Button size="small" icon={<BarChartOutlined />} onClick={() => toggleReportPreview(factorReportUrl)}>
-                                {expandedReportUrl === resolveReportUrl(factorReportUrl) ? "收起报告" : "查看报告"}
-                              </Button>
-                            ) : null}
-                          </Space>
-                        </div>
-                        {detailsExpanded ? (
-                          <div id={`factor-details-${encodeURIComponent(detailKey)}`} style={{ marginTop: 16 }}>
-                            <QuantTaskDetailsPanel
-                              taskId={meta.round_task_id}
-                              source={factor.source}
-                              details={factorTaskDetails}
-                            />
-                          </div>
-                        ) : null}
-                        {factorReportUrl && expandedReportUrl === resolveReportUrl(factorReportUrl) ? (
-                          <div id={`report-preview-${encodeURIComponent(resolveReportUrl(factorReportUrl))}`} className="report-preview-shell" style={{ marginTop: 16 }}>
-                            <div style={{ padding: "10px 12px", borderBottom: "1px solid #e5e7eb", fontSize: 13, color: "#64748b" }}>
-                              报告预览
-                            </div>
-                            <div className="report-preview-frame-wrap">
-                              <iframe
-                                src={resolveReportUrl(factorReportUrl)}
-                                title={`retained-report-preview-${index}`}
-                                className="report-preview-frame"
-                                style={{ height: 720 }}
-                              />
-                            </div>
-                          </div>
-                        ) : null}
-                      </Card>
-                    );
-                  })}
-                </div>
+                renderAutoLikeFactorCards(autoCampaignDisplayedFactors)
               )}
             </ResultSection>
           </div>
@@ -4550,18 +4623,18 @@ const FactorMining: React.FC = () => {
                       {isMobileView ? (
                         <>
                           <Form.Item label="自动挖掘提示词" name="prompt" rules={[{ required: true, message: "请输入自动挖掘目标" }]}>
-                            <Input.TextArea rows={4} placeholder="例如：从导入因子中自动挖掘更稳定的量价复合因子，优先提升 Sharpe 与稳定性" />
+                            <Input.TextArea rows={4} placeholder="例如：围绕单一目标继续优化已导入因子，优先提升 rankIC 与 L/S Sharpe 的稳定性" />
                           </Form.Item>
                           <Form.Item label="优化方向（可选）" name="direction">
                             <Select placeholder="选择本轮唯一主优化指标" options={OPTIMIZATION_DIRECTION_OPTIONS} allowClear />
                           </Form.Item>
-                          <Form.Item label="最多因子数" name="max_factor_count" tooltip="LLM 会在这个上限内自主决定选择多少个基础因子，避免后续优化过于复杂">
+                          <Form.Item label="最多因子数" name="max_factor_count" tooltip="限制 LLM 的基础因子上限，避免表达式过重">
                             <InputNumber min={1} max={50} style={{ width: "100%" }} />
                           </Form.Item>
                           <Form.Item>
                             <Button block onClick={() => void handleLLMSelectFactors()} loading={llmSelectingFactors}>LLM 自动从因子库筛选因子</Button>
                           </Form.Item>
-                          {autoLlmSelectionSummary ? <Alert type="info" showIcon style={{ marginBottom: 16 }} message="LLM 已完成因子筛选" description={autoLlmSelectionSummary} /> : null}
+                          {autoLlmSelectionSummary ? <Alert type="info" showIcon style={{ marginBottom: 16 }} message="LLM 已完成筛选" description={autoLlmSelectionSummary} /> : null}
 
                           <Form.Item name="base_factors" rules={[{ required: true, message: "请至少导入一个基础因子" }]}>
                             <Select mode="multiple" placeholder="选择要导入的因子" showSearch optionLabelProp="label" maxTagCount="responsive">{renderFactorOptions()}</Select>
@@ -4593,7 +4666,7 @@ const FactorMining: React.FC = () => {
                                 <Col xs={24} sm={12}><Form.Item label="分组数" name="n_groups"><InputNumber min={2} max={20} style={{ width: "100%" }} /></Form.Item></Col>
                                 <Col xs={24} sm={12}><Form.Item label="持有期" name="holding_period"><InputNumber min={1} max={60} style={{ width: "100%" }} /></Form.Item></Col>
                               </Row>
-                              <Form.Item label="候选轮次" name="n_candidates" tooltip="对应 FactorHub 本地候选表达式筛选轮次"><InputNumber min={1} max={10} style={{ width: "100%" }} /></Form.Item>
+                              <Form.Item label="候选轮次" name="n_candidates" tooltip="每次自动挖掘要评估的候选表达式轮次"><InputNumber min={1} max={10} style={{ width: "100%" }} /></Form.Item>
                               <Row gutter={16}>
                                 <Col xs={24} sm={12}>
                                   <Form.Item name="neutralize_industry" valuePropName="checked" style={{ marginBottom: 12 }}>
@@ -4644,7 +4717,7 @@ const FactorMining: React.FC = () => {
                                   </Form.Item>
                                 </Col>
                               </Row>
-                              <Form.Item label="每轮自动补充新增因子数" name="automation_additional_factor_count_per_round" rules={[{ required: true, message: "请输入每轮新增因子数" }]}>
+                              <Form.Item label="每轮新增因子数" name="automation_additional_factor_count_per_round" rules={[{ required: true, message: "请输入每轮新增因子数" }]}>
                                 <InputNumber min={0} max={10} style={{ width: "100%" }} />
                               </Form.Item>
                               <Form.Item label="每轮因子更新方式" name="automation_factor_update_mode">
@@ -4661,7 +4734,7 @@ const FactorMining: React.FC = () => {
                                 <Form.Item
                                   label="下一轮父代选择策略"
                                   name="automation_parent_selection_strategy"
-                                  tooltip="控制当本轮效果变差时，下一轮是沿用最新一轮继续，还是回到历史最高分结果继续。"
+                                  tooltip="决定下一轮跟着最新结果走，还是回到历史最佳结果继续。"
                                   style={{ marginBottom: 0 }}
                                 >
                                   <Select>
@@ -4670,7 +4743,7 @@ const FactorMining: React.FC = () => {
                                   </Select>
                                 </Form.Item>
                               </Card>
-                              <Form.Item label="筛选逻辑" name="automation_match_mode">
+                              <Form.Item label="筛选方式" name="automation_match_mode">
                                 <Select>
                                   <Option value="all">同时满足全部条件</Option>
                                   <Option value="any">满足任意一个条件</Option>
@@ -4700,7 +4773,7 @@ const FactorMining: React.FC = () => {
                                   </Form.Item>
                                 </Col>
                               </Row>
-                              <Form.Item label="允许的 WQ Rating" name="automation_wq_ratings" tooltip="按 WQ Rating 筛选：Spectacular / Excellent / Good / Average / Needs Improvement">
+                              <Form.Item label="允许的 WQ Rating" name="automation_wq_ratings" tooltip="为空表示不限制">
                                 <Select
                                   mode="multiple"
                                   placeholder="选择 WQ Rating；为空表示不限制"
@@ -4742,18 +4815,18 @@ const FactorMining: React.FC = () => {
 
                           <Divider styles={{ content: { margin: 0 } }} titlePlacement="left">研究目标</Divider>
                           <Form.Item label="自动挖掘提示词" name="prompt" rules={[{ required: true, message: "请输入自动挖掘目标" }]}>
-                            <Input.TextArea rows={4} placeholder="例如：从导入因子中自动挖掘更稳定的量价复合因子，优先提升 Sharpe 与稳定性" />
+                            <Input.TextArea rows={4} placeholder="例如：围绕单一目标继续优化已导入因子，优先提升 rankIC 与 L/S Sharpe 的稳定性" />
                           </Form.Item>
                           <Form.Item label="优化方向（可选）" name="direction">
                             <Select placeholder="选择本轮唯一主优化指标" options={OPTIMIZATION_DIRECTION_OPTIONS} allowClear />
                           </Form.Item>
-                          <Form.Item label="最多因子数" name="max_factor_count" tooltip="LLM 会在这个上限内自主决定选择多少个基础因子，避免后续优化过于复杂">
+                          <Form.Item label="最多因子数" name="max_factor_count" tooltip="限制 LLM 的基础因子上限，避免表达式过重">
                             <InputNumber min={1} max={50} style={{ width: "100%" }} />
                           </Form.Item>
                           <Form.Item>
                             <Button onClick={() => void handleLLMSelectFactors()} loading={llmSelectingFactors}>LLM 自动从因子库筛选因子</Button>
                           </Form.Item>
-                          {autoLlmSelectionSummary ? <Alert type="info" showIcon style={{ marginBottom: 16 }} message="LLM 已完成因子筛选" description={autoLlmSelectionSummary} /> : null}
+                          {autoLlmSelectionSummary ? <Alert type="info" showIcon style={{ marginBottom: 16 }} message="LLM 已完成筛选" description={autoLlmSelectionSummary} /> : null}
 
                           <Divider styles={{ content: { margin: 0 } }} titlePlacement="left">从因子库导入</Divider>
                           <Form.Item name="base_factors" rules={[{ required: true, message: "请至少导入一个基础因子" }]}>
@@ -4785,7 +4858,7 @@ const FactorMining: React.FC = () => {
                             <Col xs={24} sm={12}><Form.Item label="分组数" name="n_groups"><InputNumber min={2} max={20} style={{ width: "100%" }} /></Form.Item></Col>
                             <Col xs={24} sm={12}><Form.Item label="持有期" name="holding_period"><InputNumber min={1} max={60} style={{ width: "100%" }} /></Form.Item></Col>
                           </Row>
-                          <Form.Item label="候选轮次" name="n_candidates" tooltip="对应 FactorHub 本地候选表达式筛选轮次"><InputNumber min={1} max={10} style={{ width: "100%" }} /></Form.Item>
+                          <Form.Item label="候选轮次" name="n_candidates" tooltip="每次自动挖掘要评估的候选表达式轮次"><InputNumber min={1} max={10} style={{ width: "100%" }} /></Form.Item>
                           <Row gutter={16}>
                             <Col xs={24} sm={12}>
                               <Form.Item name="neutralize_industry" valuePropName="checked" style={{ marginBottom: 12 }}>
@@ -4813,7 +4886,7 @@ const FactorMining: React.FC = () => {
                                   </Form.Item>
                                 </Col>
                               </Row>
-                              <Form.Item label="每轮自动补充新增因子数" name="automation_additional_factor_count_per_round" rules={[{ required: true, message: "请输入每轮新增因子数" }]}>
+                              <Form.Item label="每轮新增因子数" name="automation_additional_factor_count_per_round" rules={[{ required: true, message: "请输入每轮新增因子数" }]}>
                                 <InputNumber min={0} max={10} style={{ width: "100%" }} />
                               </Form.Item>
                               <Form.Item label="每轮因子更新方式" name="automation_factor_update_mode">
@@ -4830,7 +4903,7 @@ const FactorMining: React.FC = () => {
                                 <Form.Item
                                   label="下一轮父代选择策略"
                                   name="automation_parent_selection_strategy"
-                                  tooltip="控制当本轮效果变差时，下一轮是沿用最新一轮继续，还是回到历史最高分结果继续。"
+                                  tooltip="决定下一轮跟着最新结果走，还是回到历史最佳结果继续。"
                                   style={{ marginBottom: 0 }}
                                 >
                                   <Select>
@@ -4839,7 +4912,7 @@ const FactorMining: React.FC = () => {
                                   </Select>
                                 </Form.Item>
                               </Card>
-                              <Form.Item label="筛选逻辑" name="automation_match_mode">
+                              <Form.Item label="筛选方式" name="automation_match_mode">
                                 <Select>
                                   <Option value="all">同时满足全部条件</Option>
                                   <Option value="any">满足任意一个条件</Option>
@@ -4869,7 +4942,7 @@ const FactorMining: React.FC = () => {
                                   </Form.Item>
                                 </Col>
                               </Row>
-                              <Form.Item label="允许的 WQ Rating" name="automation_wq_ratings" tooltip="按 WQ Rating 筛选：Spectacular / Excellent / Good / Average / Needs Improvement">
+                              <Form.Item label="允许的 WQ Rating" name="automation_wq_ratings" tooltip="为空表示不限制">
                                 <Select
                                   mode="multiple"
                                   placeholder="选择 WQ Rating；为空表示不限制"
