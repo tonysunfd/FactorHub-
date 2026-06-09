@@ -34,6 +34,7 @@ def _include_routers(app: FastAPI) -> None:
     backtest = importlib.import_module("backend.api.routers.backtest")
     data = importlib.import_module("backend.api.routers.data")
     paper = importlib.import_module("backend.api.routers.paper")
+    paper_factors = importlib.import_module("backend.api.routers.paper_factors")
     research_tools = importlib.import_module("backend.api.routers.research_tools")
     wqbrain = importlib.import_module("backend.api.routers.wqbrain")
 
@@ -45,6 +46,7 @@ def _include_routers(app: FastAPI) -> None:
     app.include_router(backtest.router, prefix="/api/backtest", tags=["策略回测"])
     app.include_router(data.router, prefix="/api/data", tags=["数据管理"])
     app.include_router(paper.router, prefix="/api/paper", tags=["模拟盘"])
+    app.include_router(paper_factors.router, prefix="/api/paper-factors", tags=["论文因子"])
     app.include_router(research_tools.router, prefix="/api/research-tools", tags=["研究工具"])
     app.include_router(wqbrain.router, prefix="/api/wqbrain", tags=["WQ BRAIN"])
 
