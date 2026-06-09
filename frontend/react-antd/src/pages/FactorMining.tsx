@@ -3109,7 +3109,7 @@ const FactorMining: React.FC = () => {
   );
 
   const getRDAgentConfigSnapshot = (): RDAgentConfigSnapshotItem[] => {
-    const values = rdAgentForm.getFieldsValue();
+    const values = rdAgentForm.getFieldsValue(true);
     const objective = String(values.objective || "").trim();
     const universe = String(values.universe || "").trim();
     const candidateUniverse = Array.isArray(values.candidate_universe) ? values.candidate_universe : [];
