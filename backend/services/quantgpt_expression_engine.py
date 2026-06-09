@@ -290,8 +290,16 @@ class ExpressionParser:
             def _ts_dual(df: pd.DataFrame, _op=op, _i1=inner1, _i2=inner2, _w=window) -> pd.Series:
                 series1, series2 = _i1(df), _i2(df)
                 if "stock_code" in df.columns:
-                    temp = pd.DataFrame({"s1": series1, "s2": series2, "stock_code": df["stock_code"]}, index=df.index)
-                    return temp.groupby("stock_code", group_keys=False).apply(lambda group: _op(group["s1"], group["s2"], _w))
+                    temp = pd.DataFrame(
+                        {"s1": series1, "s2": series2, "stock_code": df["stock_code"]},
+                        index=df.index,
+                    )
+                    values = temp.groupby("stock_code")[["s1", "s2"]].apply(
+                        lambda group: _op(group["s1"], group["s2"], _w)
+                    )
+                    if isinstance(values.index, pd.MultiIndex):
+                        values.index = values.index.get_level_values(-1)
+                    return values.reindex(df.index)
                 return _op(series1, series2, _w)
 
             return _ts_dual
@@ -529,6 +537,12 @@ class ExpressionParser:
             elif char == ")":
                 depth -= 1
             elif depth == 0 and index > 0 and expr[index : index + op_len] == op:
+                if op_len == 1 and char in "+-":
+                    prev_char = expr[index - 1] if index > 0 else ""
+                    next_char = expr[index + 1] if index + 1 < len(expr) else ""
+                    if prev_char.lower() == "e" and (next_char.isdigit() or next_char == "."):
+                        index += 1
+                        continue
                 if op_len == 1 and char in "<>=!":
                     next_char = expr[index + 1] if index + 1 < len(expr) else ""
                     prev_char = expr[index - 1] if index > 0 else ""

@@ -4829,3 +4829,57 @@ def test_quantgpt_expression_engine_supports_integer_volume_sma() -> None:
     assert composite is not None
     assert int(volume_sma.dropna().shape[0]) > 0
     assert int(composite.dropna().shape[0]) > 0
+
+
+def test_quantgpt_expression_engine_supports_scientific_notation_constants() -> None:
+    service = AutoFactorMiningService()
+    df = pd.DataFrame(
+        {
+            "trade_date": pd.date_range("2024-01-01", periods=40, freq="D"),
+            "stock_code": ["AAA"] * 40,
+            "open": [10.0 + i for i in range(40)],
+            "high": [10.5 + i for i in range(40)],
+            "low": [9.5 + i for i in range(40)],
+            "close": [10.2 + i for i in range(40)],
+            "volume": [1000 + i * 10 for i in range(40)],
+            "amount": [10000 + i * 100 for i in range(40)],
+        }
+    )
+
+    factor_series = service._quantgpt_engine.execute_on_panel(
+        df.copy(),
+        "rank(ts_mean(volume, 10) / (ts_std(volume, 10) + 1e-6))",
+    ).factor_series
+
+    assert factor_series is not None
+    assert len(factor_series) == len(df)
+    assert int(factor_series.dropna().shape[0]) > 0
+
+
+def test_quantgpt_expression_engine_keeps_ts_corr_aligned_with_panel_rows() -> None:
+    service = AutoFactorMiningService()
+    rows = []
+    for stock_code, offset in (("AAA", 0.0), ("BBB", 5.0)):
+        for day in range(20):
+            rows.append(
+                {
+                    "trade_date": pd.Timestamp("2024-01-01") + pd.Timedelta(days=day),
+                    "stock_code": stock_code,
+                    "open": 10.0 + offset + day,
+                    "high": 10.5 + offset + day,
+                    "low": 9.5 + offset + day,
+                    "close": 10.2 + offset + day,
+                    "volume": 1000.0 + offset * 10 + day * 20,
+                    "amount": 10000.0 + offset * 100 + day * 200,
+                }
+            )
+    panel_df = pd.DataFrame(rows)
+
+    factor_series = service._quantgpt_engine.execute_on_panel(
+        panel_df.copy(),
+        "ts_corr(close, volume, 5)",
+    ).factor_series
+
+    assert factor_series is not None
+    assert len(factor_series) == len(panel_df)
+    assert list(factor_series.index) == list(panel_df.index)
