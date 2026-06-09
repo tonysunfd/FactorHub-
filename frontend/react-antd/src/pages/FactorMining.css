@@ -161,6 +161,11 @@
   margin-bottom: 16px;
 }
 
+.factor-mining-container .rdagent-config-note {
+  border-radius: 12px;
+  margin-bottom: 0;
+}
+
 .factor-mining-container .rdagent-mini-summary {
   padding: 12px 14px;
   border-radius: 12px;
@@ -182,30 +187,6 @@
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-}
-
-.factor-mining-container .rdagent-inline-help {
-  border: 1px dashed rgba(148, 163, 184, 0.5);
-  border-radius: 12px;
-  background: rgba(248, 250, 252, 0.85);
-}
-
-.factor-mining-container .rdagent-inline-help .ant-collapse-header {
-  padding: 10px 14px !important;
-  font-weight: 600;
-  color: #0f172a;
-}
-
-.factor-mining-container .rdagent-inline-help .ant-collapse-content-box {
-  padding: 0 14px 14px !important;
-}
-
-.factor-mining-container .rdagent-inline-help-copy {
-  font-size: 12px;
-  line-height: 1.7;
-  color: #475569;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
 }
 
 .factor-mining-container .rdagent-config-collapse {
@@ -768,13 +749,32 @@
   gap: 12px;
   align-items: flex-start;
   margin-bottom: 14px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.factor-mining-container .rdagent-trace-header-main,
+.factor-mining-container .rdagent-trace-tags {
+  min-width: 0;
+}
+
+.factor-mining-container .rdagent-trace-header-main {
+  flex: 1 1 320px;
+}
+
+.factor-mining-container .rdagent-trace-tags {
+  display: flex;
+  width: 100%;
 }
 
 .factor-mining-container .rdagent-trace-score {
-  flex-shrink: 0;
+  flex: 0 0 auto;
+  max-width: 100%;
   font-size: 13px;
   font-weight: 600;
   color: #0f172a;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .factor-mining-container .rdagent-trace-section {
@@ -863,6 +863,9 @@
 
 .factor-mining-container .rdagent-candidate-metrics {
   min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 4px;
 }
 
 .factor-mining-container .rdagent-candidate-meta-note {
@@ -1116,6 +1119,11 @@
   .factor-mining-container .rdagent-trace-header,
   .factor-mining-container .rdagent-candidate-top {
     flex-direction: column;
+  }
+
+  .factor-mining-container .rdagent-trace-header-main {
+    width: 100%;
+    flex-basis: auto;
   }
 
   .factor-mining-container .rdagent-overview-badge {

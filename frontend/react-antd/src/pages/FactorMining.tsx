@@ -1876,7 +1876,7 @@ const FactorMining: React.FC = () => {
         type="info"
         showIcon
         style={{ marginBottom: 16, whiteSpace: "pre-wrap" }}
-        message="RDAgent 启动配置说明"
+        message="已生成启动配置"
         description={rdagentSelectionSummary}
       />
     );
@@ -3136,13 +3136,15 @@ const FactorMining: React.FC = () => {
             key: `round-${round.round_index}`,
             label: (
               <div className="rdagent-trace-header">
-                <Space wrap>
-                  <Tag color="blue">Round {round.round_index}</Tag>
-                  <Tag color={feedback.hypothesis_evaluation === "supported" ? "green" : "orange"}>
-                    {feedback.hypothesis_evaluation === "supported" ? "Supported" : "Needs Next Hypothesis"}
-                  </Tag>
-                  <Tag color="purple">{hypothesis.research_direction || "simple_baseline"}</Tag>
-                </Space>
+                <div className="rdagent-trace-header-main">
+                  <Space wrap className="rdagent-trace-tags">
+                    <Tag color="blue">Round {round.round_index}</Tag>
+                    <Tag color={feedback.hypothesis_evaluation === "supported" ? "green" : "orange"}>
+                      {feedback.hypothesis_evaluation === "supported" ? "Supported" : "Needs Next Hypothesis"}
+                    </Tag>
+                    <Tag color="purple">{hypothesis.research_direction || "simple_baseline"}</Tag>
+                  </Space>
+                </div>
                 <div className="rdagent-trace-score">Best {Number(round.best_score || 0).toFixed(1)}</div>
               </div>
             ),
@@ -3489,31 +3491,19 @@ const FactorMining: React.FC = () => {
           </Button>
           <div className="rdagent-config-toolbar">
             <div className="rdagent-mini-summary">
-              <span className="rdagent-mini-summary-label">配置重点</span>
+              <span className="rdagent-mini-summary-label">配置流程</span>
               <div className="rdagent-mini-summary-tags">
                 <Tag color="blue">先定目标</Tag>
                 <Tag color="cyan">再定字段与基础因子</Tag>
                 <Tag color="purple">最后定 Loop 与阈值</Tag>
               </div>
             </div>
-            <Collapse
-              size="small"
-              ghost
-              className="rdagent-inline-help"
-              items={[
-                {
-                  key: "expression-contract",
-                  label: "查看表达式规则",
-                  children: (
-                    <div className="rdagent-inline-help-copy">
-                      RDAgent 会生成单行表达式：字段限定 `open/high/low/close/volume/amount/vwap/pct_change`；
-                      `rank/tanh/log/abs/sigmoid` 只接 1 个参数；`ts_mean/ts_std/ts_zscore/decay_linear/ts_min/ts_max`
-                      使用 `(表达式, 整数窗口)`；比较两个序列请用 `min(x, y) / max(x, y)`。常见 `Ref/Mean/Std/If/turnover`
-                      写法会先自动规范化，仍无法解析时会直接失败并显示格式原因。
-                    </div>
-                  ),
-                },
-              ]}
+            <Alert
+              type="info"
+              showIcon
+              className="rdagent-config-note"
+              message="表达式约束已内置"
+              description="字段、窗口函数和常见别名会自动规范化；如果仍然无法解析，结果区会直接显示失败原因。"
             />
           </div>
           <Form form={rdAgentForm} layout="vertical" onFinish={startRDAgentMining}>
