@@ -310,6 +310,23 @@ interface RDAgentTraceRound {
   final_round_evaluation?: Record<string, any>;
 }
 
+interface RDAgentOverviewMetric {
+  label: string;
+  value: string;
+  tone?: "default" | "primary" | "success";
+}
+
+interface RDAgentCorrelationDisplay {
+  text: string;
+  color?: string;
+  placeholder: boolean;
+}
+
+interface RDAgentFailureReasonDisplay {
+  key: string;
+  text: string;
+}
+
 interface AutoMiningSeedState {
   result: AutoMiningResult | null;
   status: MiningStatus | null;
@@ -491,10 +508,23 @@ const normalizeRDAgentResultForDashboard = (result: AutoCampaignResult | null | 
     };
   });
   const finalRound = rounds[rounds.length - 1] as any;
+  const retainedFactors = ((result.retained_factors && result.retained_factors.length)
+    ? result.retained_factors
+    : finalRound?.retained_factors
+      || finalRound?.candidates?.filter((factor: any) => factor.status === "accepted")
+      || []) as any[];
+  const finalRoundBestScore = Number(
+    result.best_score
+    ?? result.final_round_result?.best_score
+    ?? finalRound?.best_score
+    ?? finalRound?.evaluation?.best_score
+    ?? 0,
+  );
   return {
     ...result,
     rounds,
-    retained_factors: (result.retained_factors || []).map((factor: any) =>
+    best_score: finalRoundBestScore,
+    retained_factors: retainedFactors.map((factor: any) =>
       normalizeRDAgentFactorForDashboard(
         factor,
         factor?.automation_meta?.round_index,
@@ -2208,9 +2238,11 @@ const FactorMining: React.FC = () => {
       setActiveTab("rdagent");
       setAutoWorkflowMode("campaign");
       const tasksResponse = (await api.listMiningTasks("rdagent", 10)) as any;
-      const latestTask = (tasksResponse?.data || []).find((task: any) =>
-        ["pending", "running", "cancelling", "completed", "failed"].includes(String(task.status || ""))
-      );
+      const tasks = Array.isArray(tasksResponse?.data) ? tasksResponse.data : [];
+      const latestTask = tasks.find((task: any) =>
+        ["pending", "running", "cancelling"].includes(String(task.status || ""))
+      ) || tasks.find((task: any) => String(task.status || "") === "completed")
+        || tasks.find((task: any) => String(task.status || "") === "failed");
       if (!latestTask?.task_id) {
         message.info("暂无可恢复的 RDAgent 挖掘任务");
         return;
@@ -2758,6 +2790,7 @@ const FactorMining: React.FC = () => {
     if (status.includes("coding")) return "Coding 承接表达式实现";
     if (status.includes("running")) return "Running 回测与评分";
     if (status.includes("feedback")) return "Feedback 反馈优化";
+    if (status.includes("trace")) return "Trace 完成并沉淀结果";
     if (status.includes("completed")) return "Trace 完成并沉淀结果";
     if (status.includes("failed")) return "Failed 执行失败";
     return "Pending 等待启动";
@@ -2785,6 +2818,103 @@ const FactorMining: React.FC = () => {
       ...stage,
       state: index < activeIndex ? "done" : index === activeIndex ? "active" : "pending",
     }));
+  };
+
+  const getRDAgentOverviewMetrics = (options: {
+    status?: AutoCampaignStatus | null;
+    result?: AutoCampaignResult | null;
+    elapsedSeconds?: number;
+  }): RDAgentOverviewMetric[] => {
+    const { status, result, elapsedSeconds = 0 } = options;
+    if (result) {
+      const rounds = result.rounds || [];
+      const finalRound = rounds[rounds.length - 1];
+      const latestRoundIndex = finalRound?.round_index || rounds.length || 0;
+      const retainedCount = result.retained_factors?.length || finalRound?.retained_count || 0;
+      return [
+        {
+          label: "完成轮次",
+          value: latestRoundIndex ? `第 ${latestRoundIndex} 轮` : "已完成",
+          tone: "primary",
+        },
+        {
+          label: "累计最佳分数",
+          value: Number(result.best_score || 0).toFixed(1),
+          tone: "success",
+        },
+        {
+          label: "保留候选",
+          value: `${retainedCount} 个`,
+        },
+        {
+          label: "研究耗时",
+          value: elapsedSeconds > 0 ? formatElapsedTime(elapsedSeconds) : "已完成",
+        },
+      ];
+    }
+
+    return [
+      {
+        label: "当前轮次",
+        value: `第 ${status?.current_round || 0} / ${status?.total_rounds || "-"} 轮`,
+        tone: "primary",
+      },
+      {
+        label: "当前候选",
+        value: `第 ${status?.current_generation || 0} / ${status?.total_generations || "-"} 个`,
+      },
+      {
+        label: "当前最优分数",
+        value: Number(status?.best_fitness || 0).toFixed(1),
+        tone: "success",
+      },
+      {
+        label: "累计保留",
+        value: `${status?.retained_count || 0} 个`,
+      },
+    ];
+  };
+
+  const renderRDAgentOverviewPanel = (options: {
+    status?: AutoCampaignStatus | null;
+    result?: AutoCampaignResult | null;
+    elapsedSeconds?: number;
+    upstreamStatus?: string;
+  }) => {
+    const metrics = getRDAgentOverviewMetrics(options);
+    const finished = Boolean(options.result);
+    const effectiveUpstreamStatus = options.upstreamStatus || (finished ? "completed_trace" : undefined);
+    const stageLabel = getRDAgentStageLabel(effectiveUpstreamStatus);
+    return (
+      <div className="rdagent-overview-panel">
+        <div className="rdagent-overview-hero">
+          <div>
+            <div className="rdagent-overview-eyebrow">RDAgent Flow</div>
+            <div className="rdagent-overview-title">{finished ? "研究已完成" : "研究正在推进"}</div>
+            <div className="rdagent-overview-copy">
+              {finished
+                ? "先看最终结论和阶段轨迹，再按 Trace / 人工报告继续追证据。"
+                : "阶段卡会跟着 hypothesis 到 feedback 逐步推进，当前轮证据放在下方。"}
+            </div>
+          </div>
+          <div className="rdagent-overview-badge">
+            <span className="rdagent-overview-badge-label">当前阶段</span>
+            <strong>{stageLabel}</strong>
+          </div>
+        </div>
+
+        {renderRDAgentLoopOverview(effectiveUpstreamStatus || (finished ? "trace" : undefined))}
+
+        <div className="rdagent-overview-metrics">
+          {metrics.map((metric) => (
+            <div key={metric.label} className={`rdagent-overview-metric rdagent-overview-metric-${metric.tone || "default"}`}>
+              <div className="rdagent-overview-metric-label">{metric.label}</div>
+              <div className="rdagent-overview-metric-value">{metric.value}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
   };
 
   const getRDAgentCandidateDiagnostics = (factor: any) => {
@@ -2822,12 +2952,13 @@ const FactorMining: React.FC = () => {
         text: "已生成 FactorHub 回测报告",
       });
     }
-    if (failureReasons.length) {
+    const normalizedFailureReasons = formatRDAgentFailureReasons(failureReasons);
+    if (normalizedFailureReasons.length) {
       diagnostics.push({
         type: "warning",
         label: "阈值诊断",
-        text: failureReasons
-          .map((item: any) => `${item.label || item.rule}: ${Number(item.value ?? 0).toFixed(3)} / ${Number(item.threshold ?? 0).toFixed(3)}`)
+        text: normalizedFailureReasons
+          .map((item) => item.text)
           .join("；"),
       });
     }
@@ -2839,6 +2970,57 @@ const FactorMining: React.FC = () => {
       });
     }
     return diagnostics;
+  };
+
+  const getRDAgentCorrelationDisplay = (value: any): RDAgentCorrelationDisplay => {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric <= 0) {
+      return {
+        text: "Corr 未计算",
+        color: "default",
+        placeholder: true,
+      };
+    }
+    return {
+      text: `Corr ${numeric.toFixed(2)}`,
+      color: numeric >= 0.85 ? "orange" : "green",
+      placeholder: false,
+    };
+  };
+
+  const formatRDAgentFailureReasons = (reasons: any[]): RDAgentFailureReasonDisplay[] => {
+    if (!Array.isArray(reasons)) return [];
+
+    return reasons
+      .map((item, index) => {
+        if (typeof item === "string" && item.trim()) {
+          return {
+            key: `text-${index}`,
+            text: item.trim(),
+          };
+        }
+
+        if (item && typeof item === "object") {
+          const label = String(item.label || item.rule || item.metric || "未通过阈值");
+          const value = item.value !== undefined ? Number(item.value).toFixed(3) : undefined;
+          const threshold = item.threshold !== undefined ? Number(item.threshold).toFixed(3) : undefined;
+          const comparator = item.comparator ? String(item.comparator) : undefined;
+          const segments = [label];
+          if (value !== undefined) {
+            segments.push(value);
+          }
+          if (comparator || threshold !== undefined) {
+            segments.push(`${comparator || "阈值"} ${threshold ?? "-"}`);
+          }
+          return {
+            key: `${label}-${index}`,
+            text: segments.join("："),
+          };
+        }
+
+        return null;
+      })
+      .filter((item): item is RDAgentFailureReasonDisplay => Boolean(item));
   };
 
   const toggleReportPreview = (reportUrl: string) => {
@@ -2892,20 +3074,67 @@ const FactorMining: React.FC = () => {
     </div>
   );
 
+  const renderRDAgentRoundDigest = (round?: RDAgentTraceRound | null) => {
+    if (!round) return null;
+
+    const hypothesis = round.hypothesis || {};
+    const feedback = round.feedback || {};
+    const acceptedCount = (round.candidates || round.all_factors || []).filter((factor: any) => factor.status === "accepted").length;
+    const nextHypothesis = String(feedback.next_hypothesis || "").trim();
+
+    return (
+      <div className="rdagent-round-digest">
+        <div className="rdagent-round-digest-header">
+          <div>
+            <div className="rdagent-round-digest-kicker">当前轮结论</div>
+            <h4 className="chart-title" style={{ marginBottom: 6 }}>
+              第 {round.round_index} 轮：{hypothesis.research_direction || "simple_baseline"}
+            </h4>
+            <div className="rdagent-round-digest-copy">
+              {hypothesis.statement || feedback.observations || "当前轮正在汇总 hypothesis、evaluation 和 feedback。"}
+            </div>
+          </div>
+          <Space wrap>
+            <Tag color="blue">Best {Number(round.best_score || 0).toFixed(1)}</Tag>
+            <Tag color="cyan">候选 {(round.candidates || round.all_factors || []).length}</Tag>
+            <Tag color="green">接受 {acceptedCount}</Tag>
+          </Space>
+        </div>
+        <div className="rdagent-round-digest-grid">
+          <div className="rdagent-round-digest-card">
+            <div className="rdagent-round-digest-label">Hypothesis</div>
+            <div className="rdagent-round-digest-text">{hypothesis.statement || "暂无研究假设"}</div>
+          </div>
+          <div className="rdagent-round-digest-card">
+            <div className="rdagent-round-digest-label">Feedback</div>
+            <div className="rdagent-round-digest-text">{feedback.observations || "暂无反馈摘要"}</div>
+          </div>
+          <div className="rdagent-round-digest-card">
+            <div className="rdagent-round-digest-label">Next Trace</div>
+            <div className="rdagent-round-digest-text">{nextHypothesis || "本轮暂无下一轮假设，Trace 中查看完整证据。"}</div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const renderRDAgentTrace = (rounds: RDAgentTraceRound[] = []) => {
     if (!rounds.length) {
       return <Alert message="暂无 RDAgent trace；任务完成后会展示每轮 hypothesis、experiment、evaluation 和 feedback。" type="info" showIcon />;
     }
 
     return (
-      <div className="rdagent-trace-list">
-        {rounds.map((round) => {
+      <Collapse
+        className="rdagent-trace-collapse"
+        defaultActiveKey={rounds.length ? [`round-${rounds.length}`] : []}
+        items={rounds.map((round) => {
           const hypothesis = round.hypothesis || {};
           const feedback = round.feedback || {};
           const evaluation = round.evaluation || {};
           const candidates = round.candidates || round.all_factors || [];
-          return (
-            <Card key={`${round.task_id}-${round.round_index}`} className="rdagent-trace-card" size="small">
+          return {
+            key: `round-${round.round_index}`,
+            label: (
               <div className="rdagent-trace-header">
                 <Space wrap>
                   <Tag color="blue">Round {round.round_index}</Tag>
@@ -2916,7 +3145,9 @@ const FactorMining: React.FC = () => {
                 </Space>
                 <div className="rdagent-trace-score">Best {Number(round.best_score || 0).toFixed(1)}</div>
               </div>
-
+            ),
+            children: (
+              <Card key={`${round.task_id}-${round.round_index}`} className="rdagent-trace-card" size="small" bordered={false}>
               <div className="rdagent-trace-section">
                 <div className="rdagent-trace-label">Hypothesis</div>
                 <div className="rdagent-trace-text">{hypothesis.statement || "暂无研究假设"}</div>
@@ -2949,21 +3180,28 @@ const FactorMining: React.FC = () => {
                 {candidates.map((factor: any, index: number) => {
                   const score = factor.task_details?.rdagent?.candidate_score || {};
                   const diagnostics = getRDAgentCandidateDiagnostics(factor);
+                  const correlationDisplay = getRDAgentCorrelationDisplay(score.max_correlation_with_sota);
                   return (
                     <div key={`${factor.candidate_id || factor.name}-${index}`} className={`rdagent-candidate rdagent-candidate-${factor.status || "computed"}`}>
                       <div className="rdagent-candidate-top">
-                        <span>{factor.name || `Candidate ${index + 1}`}</span>
-                        <Tag color={factor.status === "accepted" ? "green" : factor.status === "rejected" ? "red" : "default"}>
-                          {factor.status || "computed"}
-                        </Tag>
+                        <span className="rdagent-candidate-name">{factor.name || `Candidate ${index + 1}`}</span>
+                        <Space wrap size={6}>
+                          <Tag color={factor.status === "accepted" ? "green" : factor.status === "rejected" ? "red" : "default"}>
+                            {factor.status || "computed"}
+                          </Tag>
+                          {correlationDisplay.placeholder ? <Tag>{correlationDisplay.text}</Tag> : null}
+                        </Space>
                       </div>
                       <div className="factor-expression">{factor.expression}</div>
-                      <Space wrap size={4}>
+                      <Space wrap size={[4, 8]} className="rdagent-candidate-metrics">
                         <Tag>rankIC {Number(score.rank_ic ?? factor.report_metrics?.rank_ic ?? 0).toFixed(3)}</Tag>
                         <Tag>Sharpe {Number(score.sharpe ?? factor.report_metrics?.sharpe ?? 0).toFixed(2)}</Tag>
                         <Tag>Coverage {Number(score.valid_coverage ?? 0).toFixed(2)}</Tag>
-                        <Tag>Corr {Number(score.max_correlation_with_sota ?? 0).toFixed(2)}</Tag>
+                        {!correlationDisplay.placeholder ? <Tag color={correlationDisplay.color}>{correlationDisplay.text}</Tag> : null}
                       </Space>
+                      {correlationDisplay.placeholder ? (
+                        <div className="rdagent-candidate-meta-note">与 SOTA 的相关性当前还是占位值，后端尚未写入真实相关性计算结果。</div>
+                      ) : null}
                       {diagnostics.length ? (
                         <div className="rdagent-candidate-diagnostics">
                           {diagnostics.map((item, diagIndex) => (
@@ -2993,10 +3231,11 @@ const FactorMining: React.FC = () => {
                   </Space>
                 }
               />
-            </Card>
-          );
+              </Card>
+            ),
+          };
         })}
-      </div>
+      />
     );
   };
 
@@ -3014,7 +3253,12 @@ const FactorMining: React.FC = () => {
     const resolvedReportUrl = resolveReportUrl(String(reportUrl || ""));
 
     return (
-      <Card size="small" title={report.title || "RDAgent 手动挖掘报告"} style={{ marginBottom: 16, background: "#fafafa" }}>
+      <Card
+        size="small"
+        title={report.title || "RDAgent 手动挖掘报告"}
+        className="rdagent-manual-report-card"
+        style={{ marginBottom: 16, background: "#fafafa" }}
+      >
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
           <Space wrap>
             <Tag color="blue">{report.layout || "manual-mining-report"}</Tag>
@@ -3041,26 +3285,33 @@ const FactorMining: React.FC = () => {
           ) : null}
 
           {ranking ? (
-            <div>
+            <div className="rdagent-report-section">
               <div className="rdagent-trace-label">{ranking.title || "候选因子排序"}</div>
               <div className="rdagent-trace-muted" style={{ marginBottom: 8 }}>{ranking.summary}</div>
               <div className="rdagent-candidate-grid">
                 {(ranking.rows || []).map((row: any, index: number) => {
                   const metrics = row.metrics || {};
+                  const correlationDisplay = getRDAgentCorrelationDisplay(metrics.max_correlation_with_sota);
                   return (
                     <div key={`${row.candidate_id || row.name}-${index}`} className={`rdagent-candidate rdagent-candidate-${row.status || "computed"}`}>
                       <div className="rdagent-candidate-top">
-                        <span>{row.name || `Candidate ${index + 1}`}</span>
-                        <Tag color={row.status === "accepted" ? "green" : row.status === "rejected" ? "red" : "default"}>{row.status || "computed"}</Tag>
+                        <span className="rdagent-candidate-name">{row.name || `Candidate ${index + 1}`}</span>
+                        <Space wrap size={6}>
+                          <Tag color={row.status === "accepted" ? "green" : row.status === "rejected" ? "red" : "default"}>{row.status || "computed"}</Tag>
+                          {correlationDisplay.placeholder ? <Tag>{correlationDisplay.text}</Tag> : null}
+                        </Space>
                       </div>
                       <div className="factor-expression">{row.expression}</div>
-                      <Space wrap size={4}>
+                      <Space wrap size={[4, 8]} className="rdagent-candidate-metrics">
                         {row.optimization_metric ? <Tag color="blue">{row.optimization_metric} {Number(row.optimization_score ?? 0).toFixed(3)}</Tag> : null}
                         <Tag>rankIC {Number(metrics.rank_ic ?? 0).toFixed(3)}</Tag>
                         <Tag>Sharpe {Number(metrics.sharpe ?? 0).toFixed(2)}</Tag>
                         <Tag>Coverage {Number(metrics.valid_coverage ?? 0).toFixed(2)}</Tag>
-                        <Tag>Corr {Number(metrics.max_correlation_with_sota ?? 0).toFixed(2)}</Tag>
+                        {!correlationDisplay.placeholder ? <Tag color={correlationDisplay.color}>{correlationDisplay.text}</Tag> : null}
                       </Space>
+                      {correlationDisplay.placeholder ? (
+                        <div className="rdagent-candidate-meta-note">当前报告中的相关性还是占位值，不代表真实相关性为 0。</div>
+                      ) : null}
                     </div>
                   );
                 })}
@@ -3236,188 +3487,219 @@ const FactorMining: React.FC = () => {
           >
             终止当前 RDAgent 任务
           </Button>
-          <Alert
-            type="info"
-            showIcon
-            style={{ marginBottom: 16 }}
-            message="FactorHub 表达式格式"
-            description="RDAgent 会生成单行表达式：字段限定 open/high/low/close/volume/amount/vwap/pct_change；rank/tanh/log/abs/sigmoid 只接 1 个参数；ts_mean/ts_std/ts_zscore/decay_linear/ts_min/ts_max 使用 (表达式, 整数窗口)；比较两个序列请用 min(x, y) / max(x, y)。常见 Ref/Mean/Std/If/turnover 写法会先自动规范化，仍无法解析时会直接失败并显示格式原因。"
-          />
-          <Form form={rdAgentForm} layout="vertical" onFinish={startRDAgentMining}>
-            <Divider styles={{ content: { margin: 0 } }} titlePlacement="left">任务目标</Divider>
-            <Form.Item label="挖掘目标" name="objective" rules={[{ required: true, message: "请输入挖掘目标" }]}>
-              <Input.TextArea rows={3} placeholder="例如：寻找低相关、低换手、rankIC 稳定的价量因子" />
-            </Form.Item>
-            <Form.Item label="日期范围" name="dateRange" rules={[{ required: true, message: "请选择日期范围" }]}>
-              <RangePicker
-                style={{ width: "100%" }}
-                allowClear
-                inputReadOnly={isMobileView}
-                placement={isMobileView ? "bottomLeft" : undefined}
-                getPopupContainer={(trigger) => trigger.parentElement || document.body}
-              />
-            </Form.Item>
-            <Row gutter={16}>
-              <Col xs={24} sm={12}>
-                <Form.Item label="股票池" name="universe" rules={[{ required: true, message: "请选择股票池" }]}>
-                  <Select>
-                    <Option value="hs300">HS300</Option>
-                    <Option value="zz500">ZZ500</Option>
-                    <Option value="zz1000">ZZ1000</Option>
-                    <Option value="all">全市场</Option>
-                  </Select>
-                </Form.Item>
-              </Col>
-              <Col xs={24} sm={12}>
-                <Form.Item label="基准" name="benchmark" rules={[{ required: true, message: "请选择基准" }]}>
-                  <Select>
-                    <Option value="hs300">HS300</Option>
-                    <Option value="zz500">ZZ500</Option>
-                    <Option value="zz1000">ZZ1000</Option>
-                  </Select>
-                </Form.Item>
-              </Col>
-            </Row>
-
-            <Divider styles={{ content: { margin: 0 } }} titlePlacement="left">启动配置</Divider>
-            <div className="rdagent-bootstrap-mode">
-              <div className="rdagent-bootstrap-mode-head">
-                <div>
-                  <div className="rdagent-bootstrap-mode-title">字段与基础因子来源</div>
-                  <div className="rdagent-bootstrap-mode-desc">
-                    候选字段决定 `LLM` 的输入范围；基础因子会作为研究起点。
-                  </div>
-                </div>
-                <Segmented
-                  value={rdagentBootstrapMode}
-                  onChange={(value) => setRdagentBootstrapMode(value as RDAgentBootstrapMode)}
-                  options={[
-                    { label: "LLM 自动配置", value: "llm_auto" },
-                    { label: "手动配置", value: "manual" },
-                  ]}
-                />
+          <div className="rdagent-config-toolbar">
+            <div className="rdagent-mini-summary">
+              <span className="rdagent-mini-summary-label">配置重点</span>
+              <div className="rdagent-mini-summary-tags">
+                <Tag color="blue">先定目标</Tag>
+                <Tag color="cyan">再定字段与基础因子</Tag>
+                <Tag color="purple">最后定 Loop 与阈值</Tag>
               </div>
-              {rdagentBootstrapMode === "llm_auto" ? (
-                <div className="rdagent-bootstrap-panel">
-                  <Form.Item style={{ marginBottom: 12 }}>
-                    <Button block type="primary" onClick={() => void handleRDAgentLLMBootstrap()} loading={llmSelectingFactors}>
-                      {rdagentSelectionSummary ? "重新生成候选字段与基础因子" : "生成候选字段与基础因子"}
-                    </Button>
-                  </Form.Item>
-                  <div className="text-hint" style={{ marginBottom: 12 }}>
-                    先自动挑字段，再给出一组更合适的起始因子。
-                  </div>
-                  {renderRDAgentBootstrapSummary()}
-                </div>
-              ) : (
-                <Alert
-                  type="info"
-                  showIcon
-                  style={{ marginBottom: 16 }}
-                  message="当前为手动配置"
-                  description="你自己决定字段 Universe 和基础因子；RDAgent 会在这组边界内继续生成与优化。"
-                />
-              )}
             </div>
-
-            <Divider styles={{ content: { margin: 0 } }} titlePlacement="left">RDAgent Loop</Divider>
-            <Row gutter={16}>
-              <Col xs={24} sm={12}>
-                <Form.Item label="最大优化轮数" name="max_iterations" rules={[{ required: true, message: "请输入最大优化轮数" }]}>
-                  <InputNumber min={1} max={6} style={{ width: "100%" }} />
-                </Form.Item>
-              </Col>
-              <Col xs={24} sm={12}>
-                <Form.Item label="每轮候选" name="candidates_per_iteration" rules={[{ required: true, message: "请输入每轮候选数" }]}>
-                  <InputNumber min={1} max={5} style={{ width: "100%" }} />
-                </Form.Item>
-              </Col>
-            </Row>
-            <Row gutter={16}>
-              <Col xs={24} sm={12}>
-                <Form.Item label="分组数" name="n_groups">
-                  <InputNumber min={2} max={20} style={{ width: "100%" }} />
-                </Form.Item>
-              </Col>
-              <Col xs={24} sm={12}>
-                <Form.Item label="持有期" name="holding_period">
-                  <InputNumber min={1} max={60} style={{ width: "100%" }} />
-                </Form.Item>
-              </Col>
-            </Row>
-            <Form.Item label="优化方向" name="direction">
-              <Select allowClear options={OPTIMIZATION_DIRECTION_OPTIONS} />
-            </Form.Item>
-            <Row gutter={16}>
-              <Col xs={24} sm={12}>
-                <Form.Item name="neutralize_industry" valuePropName="checked">
-                  <Checkbox>行业中性</Checkbox>
-                </Form.Item>
-              </Col>
-              <Col xs={24} sm={12}>
-                <Form.Item name="neutralize_cap" valuePropName="checked">
-                  <Checkbox>市值中性</Checkbox>
-                </Form.Item>
-              </Col>
-            </Row>
-            <Form.Item
-              label="候选字段 Universe"
-              name="candidate_universe"
-              tooltip="RDAgent 只会在这里列出的字段范围内组合表达式；自动模式下可先让 LLM 生成，再人工微调。"
-              rules={[{ required: true, message: "请选择候选字段" }]}
+            <Collapse
+              size="small"
+              ghost
+              className="rdagent-inline-help"
+              items={[
+                {
+                  key: "expression-contract",
+                  label: "查看表达式规则",
+                  children: (
+                    <div className="rdagent-inline-help-copy">
+                      RDAgent 会生成单行表达式：字段限定 `open/high/low/close/volume/amount/vwap/pct_change`；
+                      `rank/tanh/log/abs/sigmoid` 只接 1 个参数；`ts_mean/ts_std/ts_zscore/decay_linear/ts_min/ts_max`
+                      使用 `(表达式, 整数窗口)`；比较两个序列请用 `min(x, y) / max(x, y)`。常见 `Ref/Mean/Std/If/turnover`
+                      写法会先自动规范化，仍无法解析时会直接失败并显示格式原因。
+                    </div>
+                  ),
+                },
+              ]}
+            />
+          </div>
+          <Form form={rdAgentForm} layout="vertical" onFinish={startRDAgentMining}>
+            <Collapse
+              defaultActiveKey={["objective", "bootstrap"]}
+              className="rdagent-config-collapse"
             >
-              <Select mode="multiple" placeholder="选择 FactorHub 已有行情字段" maxTagCount="responsive">
-                {FACTORHUB_MARKET_FIELDS.map((field) => (
-                  <Option key={field} value={field}>{field}</Option>
-                ))}
-              </Select>
-            </Form.Item>
-            <Form.Item
-              label="基础因子"
-              name="base_factors"
-              tooltip="这些基础因子会作为初始研究上下文输入给 RDAgent，用来继承已有研究，而不是每次全新构建。"
-            >
-              <Select mode="multiple" placeholder="可选：作为 RDAgent 初始研究上下文" showSearch optionLabelProp="label" maxTagCount="responsive">
-                {renderFactorOptions()}
-              </Select>
-            </Form.Item>
-            {rdagentBootstrapMode === "llm_auto" ? (
-              <div className="text-hint" style={{ marginTop: -8, marginBottom: 12 }}>
-                自动生成后仍可继续手动调整。
-              </div>
-            ) : null}
-            <Form.Item label="SOTA 分类 ID" name="sota_library_id">
-              <Input placeholder="factorhub-sota" />
-            </Form.Item>
+              <Panel header="1. 任务目标" key="objective">
+                <Form.Item label="挖掘目标" name="objective" rules={[{ required: true, message: "请输入挖掘目标" }]}>
+                  <Input.TextArea rows={3} placeholder="例如：寻找低相关、低换手、rankIC 稳定的价量因子" />
+                </Form.Item>
+                <Form.Item label="日期范围" name="dateRange" rules={[{ required: true, message: "请选择日期范围" }]}>
+                  <RangePicker
+                    style={{ width: "100%" }}
+                    allowClear
+                    inputReadOnly={isMobileView}
+                    placement={isMobileView ? "bottomLeft" : undefined}
+                    getPopupContainer={(trigger) => trigger.parentElement || document.body}
+                  />
+                </Form.Item>
+                <Row gutter={16}>
+                  <Col xs={24} sm={12}>
+                    <Form.Item label="股票池" name="universe" rules={[{ required: true, message: "请选择股票池" }]}>
+                      <Select>
+                        <Option value="hs300">HS300</Option>
+                        <Option value="zz500">ZZ500</Option>
+                        <Option value="zz1000">ZZ1000</Option>
+                        <Option value="all">全市场</Option>
+                      </Select>
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24} sm={12}>
+                    <Form.Item label="基准" name="benchmark" rules={[{ required: true, message: "请选择基准" }]}>
+                      <Select>
+                        <Option value="hs300">HS300</Option>
+                        <Option value="zz500">ZZ500</Option>
+                        <Option value="zz1000">ZZ1000</Option>
+                      </Select>
+                    </Form.Item>
+                  </Col>
+                </Row>
+              </Panel>
 
-            <Divider styles={{ content: { margin: 0 } }} titlePlacement="left">入选阈值</Divider>
-            <Row gutter={16}>
-              <Col xs={24} sm={12}>
-                <Form.Item label="最低 rankIC" name="min_rank_ic">
-                  <InputNumber min={-1} max={1} step={0.001} style={{ width: "100%" }} />
+              <Panel header="2. 字段与研究起点" key="bootstrap">
+                <div className="rdagent-bootstrap-mode">
+                  <div className="rdagent-bootstrap-mode-head">
+                    <div>
+                      <div className="rdagent-bootstrap-mode-title">字段与基础因子来源</div>
+                      <div className="rdagent-bootstrap-mode-desc">
+                        候选字段决定 `LLM` 的输入范围；基础因子会作为研究起点。
+                      </div>
+                    </div>
+                    <Segmented
+                      value={rdagentBootstrapMode}
+                      onChange={(value) => setRdagentBootstrapMode(value as RDAgentBootstrapMode)}
+                      options={[
+                        { label: "LLM 自动配置", value: "llm_auto" },
+                        { label: "手动配置", value: "manual" },
+                      ]}
+                    />
+                  </div>
+                  {rdagentBootstrapMode === "llm_auto" ? (
+                    <div className="rdagent-bootstrap-panel">
+                      <Form.Item style={{ marginBottom: 12 }}>
+                        <Button block type="primary" onClick={() => void handleRDAgentLLMBootstrap()} loading={llmSelectingFactors}>
+                          {rdagentSelectionSummary ? "重新生成候选字段与基础因子" : "生成候选字段与基础因子"}
+                        </Button>
+                      </Form.Item>
+                      <div className="text-hint" style={{ marginBottom: 12 }}>
+                        先自动挑字段，再给出一组更合适的起始因子。
+                      </div>
+                      {renderRDAgentBootstrapSummary()}
+                    </div>
+                  ) : (
+                    <Alert
+                      type="info"
+                      showIcon
+                      style={{ marginBottom: 16 }}
+                      message="当前为手动配置"
+                      description="你自己决定字段 Universe 和基础因子；RDAgent 会在这组边界内继续生成与优化。"
+                    />
+                  )}
+                </div>
+                <Form.Item
+                  label="候选字段 Universe"
+                  name="candidate_universe"
+                  tooltip="RDAgent 只会在这里列出的字段范围内组合表达式；自动模式下可先让 LLM 生成，再人工微调。"
+                  rules={[{ required: true, message: "请选择候选字段" }]}
+                >
+                  <Select mode="multiple" placeholder="选择 FactorHub 已有行情字段" maxTagCount="responsive">
+                    {FACTORHUB_MARKET_FIELDS.map((field) => (
+                      <Option key={field} value={field}>{field}</Option>
+                    ))}
+                  </Select>
                 </Form.Item>
-              </Col>
-              <Col xs={24} sm={12}>
-                <Form.Item label="最低年化收益增量" name="min_annualized_return_delta">
-                  <InputNumber min={-1} max={1} step={0.001} style={{ width: "100%" }} />
+                <Form.Item
+                  label="基础因子"
+                  name="base_factors"
+                  tooltip="这些基础因子会作为初始研究上下文输入给 RDAgent，用来继承已有研究，而不是每次全新构建。"
+                >
+                  <Select mode="multiple" placeholder="可选：作为 RDAgent 初始研究上下文" showSearch optionLabelProp="label" maxTagCount="responsive">
+                    {renderFactorOptions()}
+                  </Select>
                 </Form.Item>
-              </Col>
-            </Row>
-            <Row gutter={16}>
-              <Col xs={24} sm={12}>
-                <Form.Item label="最大回撤退化" name="max_drawdown_regression">
+                {rdagentBootstrapMode === "llm_auto" ? (
+                  <div className="text-hint" style={{ marginTop: -8, marginBottom: 12 }}>
+                    自动生成后仍可继续手动调整。
+                  </div>
+                ) : null}
+                <Form.Item label="SOTA 分类 ID" name="sota_library_id">
+                  <Input placeholder="factorhub-sota" />
+                </Form.Item>
+              </Panel>
+
+              <Panel header="3. RDAgent Loop 参数" key="loop">
+                <Row gutter={16}>
+                  <Col xs={24} sm={12}>
+                    <Form.Item label="最大优化轮数" name="max_iterations" rules={[{ required: true, message: "请输入最大优化轮数" }]}>
+                      <InputNumber min={1} max={6} style={{ width: "100%" }} />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24} sm={12}>
+                    <Form.Item label="每轮候选" name="candidates_per_iteration" rules={[{ required: true, message: "请输入每轮候选数" }]}>
+                      <InputNumber min={1} max={5} style={{ width: "100%" }} />
+                    </Form.Item>
+                  </Col>
+                </Row>
+                <Row gutter={16}>
+                  <Col xs={24} sm={12}>
+                    <Form.Item label="分组数" name="n_groups">
+                      <InputNumber min={2} max={20} style={{ width: "100%" }} />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24} sm={12}>
+                    <Form.Item label="持有期" name="holding_period">
+                      <InputNumber min={1} max={60} style={{ width: "100%" }} />
+                    </Form.Item>
+                  </Col>
+                </Row>
+                <Form.Item label="优化方向" name="direction">
+                  <Select allowClear options={OPTIMIZATION_DIRECTION_OPTIONS} />
+                </Form.Item>
+                <Row gutter={16}>
+                  <Col xs={24} sm={12}>
+                    <Form.Item name="neutralize_industry" valuePropName="checked">
+                      <Checkbox>行业中性</Checkbox>
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24} sm={12}>
+                    <Form.Item name="neutralize_cap" valuePropName="checked">
+                      <Checkbox>市值中性</Checkbox>
+                    </Form.Item>
+                  </Col>
+                </Row>
+              </Panel>
+
+              <Panel header="4. 入选阈值" key="thresholds">
+                <Row gutter={16}>
+                  <Col xs={24} sm={12}>
+                    <Form.Item label="最低 rankIC" name="min_rank_ic">
+                      <InputNumber min={-1} max={1} step={0.001} style={{ width: "100%" }} />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24} sm={12}>
+                    <Form.Item label="最低年化收益增量" name="min_annualized_return_delta">
+                      <InputNumber min={-1} max={1} step={0.001} style={{ width: "100%" }} />
+                    </Form.Item>
+                  </Col>
+                </Row>
+                <Row gutter={16}>
+                  <Col xs={24} sm={12}>
+                    <Form.Item label="最大回撤退化" name="max_drawdown_regression">
+                      <InputNumber min={0} max={1} step={0.01} style={{ width: "100%" }} />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24} sm={12}>
+                    <Form.Item label="最低有效覆盖率" name="min_valid_coverage">
+                      <InputNumber min={0} max={1} step={0.01} style={{ width: "100%" }} />
+                    </Form.Item>
+                  </Col>
+                </Row>
+                <Form.Item label="与 SOTA 最大相关性" name="max_correlation_with_sota">
                   <InputNumber min={0} max={1} step={0.01} style={{ width: "100%" }} />
                 </Form.Item>
-              </Col>
-              <Col xs={24} sm={12}>
-                <Form.Item label="最低有效覆盖率" name="min_valid_coverage">
-                  <InputNumber min={0} max={1} step={0.01} style={{ width: "100%" }} />
-                </Form.Item>
-              </Col>
-            </Row>
-            <Form.Item label="与 SOTA 最大相关性" name="max_correlation_with_sota">
-              <InputNumber min={0} max={1} step={0.01} style={{ width: "100%" }} />
-            </Form.Item>
+              </Panel>
+            </Collapse>
             <Form.Item>
               <Button type="primary" htmlType="submit" icon={<PlayCircleOutlined />} loading={loading && activeTab === "rdagent"} block size="large" disabled={mining}>
                 {mining && activeTab === "rdagent" ? "挖掘中..." : "启动 RDAgent 因子挖掘"}
@@ -3427,7 +3709,7 @@ const FactorMining: React.FC = () => {
         </Card>
       </Col>
 
-      <Col xs={24} lg={16}>
+      <Col xs={24} lg={16} className="rdagent-result-column">
         <Card title="RDAgent 因子挖掘结果" className="result-card">{renderStatusCard()}</Card>
       </Col>
     </Row>
@@ -3676,12 +3958,21 @@ const FactorMining: React.FC = () => {
               }
               style={{ marginBottom: 24 }}
             />
-            {activeTab === "rdagent" ? renderRDAgentLoopOverview((autoCampaignStatus as any).upstream_status) : null}
-            <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
-              <Col xs={24} sm={8}><Card size="small"><div className="stat-label">总进度</div><div className="stat-value">{progressPercent}%</div></Card></Col>
-              <Col xs={24} sm={8}><Card size="small"><div className="stat-label">当前最优分数</div><div className="stat-value">{autoCampaignStatus.best_fitness?.toFixed?.(1) || "0.0"}</div></Card></Col>
-              <Col xs={24} sm={8}><Card size="small"><div className="stat-label">累计保留因子</div><div className="stat-value">{autoCampaignStatus.retained_count || 0}</div></Card></Col>
-            </Row>
+            {activeTab === "rdagent" ? (
+              <div style={{ marginBottom: 24 }}>
+                {renderRDAgentOverviewPanel({
+                  status: autoCampaignStatus,
+                  elapsedSeconds: elapsedTime,
+                  upstreamStatus: (autoCampaignStatus as any).upstream_status,
+                })}
+              </div>
+            ) : (
+              <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
+                <Col xs={24} sm={8}><Card size="small"><div className="stat-label">总进度</div><div className="stat-value">{progressPercent}%</div></Card></Col>
+                <Col xs={24} sm={8}><Card size="small"><div className="stat-label">当前最优分数</div><div className="stat-value">{autoCampaignStatus.best_fitness?.toFixed?.(1) || "0.0"}</div></Card></Col>
+                <Col xs={24} sm={8}><Card size="small"><div className="stat-label">累计保留因子</div><div className="stat-value">{autoCampaignStatus.retained_count || 0}</div></Card></Col>
+              </Row>
+            )}
             <Progress percent={progressPercent} status="active" strokeColor="#3b82f6" />
             <div className="chart-section" style={{ marginTop: 24 }}>
               <h4 className="chart-title">{activeTab === "rdagent" ? "RDAgent 研究曲线" : "自动化研究曲线"}</h4>
@@ -3690,7 +3981,8 @@ const FactorMining: React.FC = () => {
             {activeTab === "rdagent" && (runningRDAgentRound || runningRDAgentCandidates.length) ? (
               <div style={{ marginTop: 24 }}>
                 <Divider />
-                <h3 className="result-title">当前 RDAgent 轮次证据</h3>
+                {renderRDAgentRoundDigest(runningRDAgentRound as RDAgentTraceRound)}
+                <h3 className="result-title" style={{ marginTop: runningRDAgentRound ? 20 : 0 }}>当前 RDAgent 轮次证据</h3>
                 {runningRDAgentRound
                   ? renderRDAgentTrace([runningRDAgentRound as RDAgentTraceRound])
                   : (
@@ -3698,18 +3990,26 @@ const FactorMining: React.FC = () => {
                       {runningRDAgentCandidates.map((factor: any, index: number) => {
                         const score = factor.task_details?.rdagent?.candidate_score || {};
                         const diagnostics = getRDAgentCandidateDiagnostics(factor);
+                        const correlationDisplay = getRDAgentCorrelationDisplay(score.max_correlation_with_sota);
                         return (
                           <div key={`${factor.candidate_id || factor.name}-${index}`} className={`rdagent-candidate rdagent-candidate-${factor.status || "computed"}`}>
                             <div className="rdagent-candidate-top">
-                              <span>{factor.name || `Candidate ${index + 1}`}</span>
-                              <Tag>{factor.status || "computed"}</Tag>
+                              <span className="rdagent-candidate-name">{factor.name || `Candidate ${index + 1}`}</span>
+                              <Space wrap size={6}>
+                                <Tag>{factor.status || "computed"}</Tag>
+                                {correlationDisplay.placeholder ? <Tag>{correlationDisplay.text}</Tag> : null}
+                              </Space>
                             </div>
                             <div className="factor-expression">{factor.expression}</div>
-                            <Space wrap size={4}>
+                            <Space wrap size={[4, 8]} className="rdagent-candidate-metrics">
                               <Tag>rankIC {Number(score.rank_ic ?? factor.backtest_summary?.rank_ic_mean ?? 0).toFixed(3)}</Tag>
                               <Tag>Sharpe {Number(score.sharpe ?? factor.report_metrics?.sharpe ?? 0).toFixed(2)}</Tag>
                               <Tag>Coverage {Number(score.valid_coverage ?? 0).toFixed(2)}</Tag>
+                              {!correlationDisplay.placeholder ? <Tag color={correlationDisplay.color}>{correlationDisplay.text}</Tag> : null}
                             </Space>
+                            {correlationDisplay.placeholder ? (
+                              <div className="rdagent-candidate-meta-note">相关性指标尚未计算完成，当前显示的是占位态。</div>
+                            ) : null}
                             {diagnostics.length ? (
                               <div className="rdagent-candidate-diagnostics">
                                 {diagnostics.map((item, diagIndex) => (
@@ -3753,16 +4053,22 @@ const FactorMining: React.FC = () => {
             </Row>
 
             {isRDAgentResult ? (
-              <>
-                {renderRDAgentLoopOverview("trace")}
-              </>
+              <div style={{ marginBottom: 24 }}>
+                {renderRDAgentOverviewPanel({
+                  result: autoCampaignResult,
+                  elapsedSeconds: elapsedTime,
+                  upstreamStatus: "trace",
+                })}
+              </div>
             ) : null}
 
             <ResultSection
               kicker={isRDAgentResult ? "运行概览" : "结果概览"}
               title={activeTab === "rdagent" ? "RDAgent 研究结果" : "自动化研究结果"}
-              description={isRDAgentResult ? "先看当前轮次和候选结论，完整证据放在下面的标签页里。" : "先看最终产出和研究曲线，轮次细节放在下方。"}
+              description={isRDAgentResult ? "先看最终结论和研究曲线，再到下方 Trace / 人工报告查看完整证据链。" : "先看最终产出和研究曲线，轮次细节放在下方。"}
+              extra={isRDAgentResult ? <Tag color="gold">Flow Summary</Tag> : undefined}
             >
+              {isRDAgentResult ? renderRDAgentRoundDigest(latestRDAgentRound) : null}
               <div className="chart-section" style={{ marginBottom: 0 }}>
                 <h4 className="chart-title">{activeTab === "rdagent" ? "RDAgent 完整研究曲线" : "自动化完整研究曲线"}</h4>
                 <div ref={resultChartRef} className="chart-container" style={{ height: 300 }} />
@@ -3772,8 +4078,8 @@ const FactorMining: React.FC = () => {
             {isRDAgentResult ? (
               <ResultSection
                 kicker="研究细节"
-                title="RDAgent 证据与后续动作"
-                description="这部分保留完整 trace、人工报告和继续挖掘入口，但默认按标签分组，避免页面像说明文档。"
+                title="RDAgent Trace 与后续动作"
+                description="Trace 保留每轮 hypothesis、experiment、evaluation 和 feedback；人工报告单独放一页，减少主视图压力。"
               >
                 <Tabs
                   className="result-detail-tabs"
@@ -3798,8 +4104,10 @@ const FactorMining: React.FC = () => {
                       ),
                       children: (
                         <>
-                          {renderRDAgentManualReport(rdagentManualReport)}
-                          {renderRDAgentContinueAction(rdagentContinueRequest)}
+                          <div className="rdagent-report-stack">
+                            {renderRDAgentManualReport(rdagentManualReport)}
+                            {renderRDAgentContinueAction(rdagentContinueRequest)}
+                          </div>
                         </>
                       ),
                     },

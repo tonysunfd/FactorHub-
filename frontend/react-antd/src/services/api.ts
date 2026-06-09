@@ -32,8 +32,18 @@ type RDAgentMiningRequest = {
   }
 }
 
+const backendPort = String(import.meta.env.VITE_BACKEND_PORT || '8001')
+
+const resolveApiBaseUrl = () => {
+  if (typeof window === 'undefined') {
+    return `http://127.0.0.1:${backendPort}/api`
+  }
+  const host = window.location.hostname || '127.0.0.1'
+  return `${window.location.protocol}//${host}:${backendPort}/api`
+}
+
 const request = axios.create({
-  baseURL: '/api',
+  baseURL: resolveApiBaseUrl(),
   timeout: 30000,
   headers: {
     'Content-Type': 'application/json'
