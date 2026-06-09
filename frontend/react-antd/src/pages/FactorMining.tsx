@@ -327,6 +327,14 @@ interface RDAgentFailureReasonDisplay {
   text: string;
 }
 
+interface RDAgentLoopSnapshot {
+  bestScore: number;
+  avgScore: number;
+  retainedCount: number;
+  baseFactors: string[];
+  candidateCount: number;
+}
+
 interface AutoMiningSeedState {
   result: AutoMiningResult | null;
   status: MiningStatus | null;
@@ -2889,12 +2897,12 @@ const FactorMining: React.FC = () => {
       <div className="rdagent-overview-panel">
         <div className="rdagent-overview-hero">
           <div>
-            <div className="rdagent-overview-eyebrow">RDAgent Flow</div>
-            <div className="rdagent-overview-title">{finished ? "研究已完成" : "研究正在推进"}</div>
+            <div className="rdagent-overview-eyebrow">RDAgent Workspace</div>
+            <div className="rdagent-overview-title">{finished ? "Loop 已完成" : "Loop 进行中"}</div>
             <div className="rdagent-overview-copy">
               {finished
-                ? "先看最终结论和阶段轨迹，再按 Trace / 人工报告继续追证据。"
-                : "阶段卡会跟着 hypothesis 到 feedback 逐步推进，当前轮证据放在下方。"}
+                ? "先看当前阶段、Loop 指标和 Trace，再决定是否人工确认或继续挖掘。"
+                : "这里是运行工作台，配置在左侧，当前 Loop 证据和候选在右侧持续刷新。"}
             </div>
           </div>
           <div className="rdagent-overview-badge">
@@ -3074,12 +3082,39 @@ const FactorMining: React.FC = () => {
     </div>
   );
 
+  const getRDAgentRoundSnapshot = (round?: RDAgentTraceRound | null): RDAgentLoopSnapshot => {
+    const candidates = round?.candidates || round?.all_factors || [];
+    const evaluation = round?.evaluation || {};
+    const bestScore = Number(round?.best_score ?? evaluation?.best_score ?? 0);
+    const avgScore = Number(round?.avg_score ?? evaluation?.avg_score ?? 0);
+    const retainedCount = Number(
+      round?.retained_count
+      ?? candidates.filter((factor: any) => factor.status === "accepted").length
+      ?? 0,
+    );
+    const baseFactors = Array.isArray(round?.input_base_factors)
+      ? round!.input_base_factors!
+      : Array.isArray((round as any)?.selected_factors)
+        ? (round as any).selected_factors
+        : Array.isArray((round as any)?.experiment?.base_factors)
+          ? (round as any).experiment.base_factors
+          : [];
+
+    return {
+      bestScore,
+      avgScore,
+      retainedCount,
+      baseFactors,
+      candidateCount: candidates.length,
+    };
+  };
+
   const renderRDAgentRoundDigest = (round?: RDAgentTraceRound | null) => {
     if (!round) return null;
 
     const hypothesis = round.hypothesis || {};
     const feedback = round.feedback || {};
-    const acceptedCount = (round.candidates || round.all_factors || []).filter((factor: any) => factor.status === "accepted").length;
+    const snapshot = getRDAgentRoundSnapshot(round);
     const nextHypothesis = String(feedback.next_hypothesis || "").trim();
 
     return (
@@ -3095,9 +3130,9 @@ const FactorMining: React.FC = () => {
             </div>
           </div>
           <Space wrap>
-            <Tag color="blue">Best {Number(round.best_score || 0).toFixed(1)}</Tag>
-            <Tag color="cyan">候选 {(round.candidates || round.all_factors || []).length}</Tag>
-            <Tag color="green">接受 {acceptedCount}</Tag>
+            <Tag color="blue">Best {snapshot.bestScore.toFixed(1)}</Tag>
+            <Tag color="cyan">候选 {snapshot.candidateCount}</Tag>
+            <Tag color="green">接受 {snapshot.retainedCount}</Tag>
           </Space>
         </div>
         <div className="rdagent-round-digest-grid">
@@ -3145,7 +3180,7 @@ const FactorMining: React.FC = () => {
                     <Tag color="purple">{hypothesis.research_direction || "simple_baseline"}</Tag>
                   </Space>
                 </div>
-                <div className="rdagent-trace-score">Best {Number(round.best_score || 0).toFixed(1)}</div>
+                <div className="rdagent-trace-score">Best {getRDAgentRoundSnapshot(round).bestScore.toFixed(1)}</div>
               </div>
             ),
             children: (
@@ -3160,8 +3195,8 @@ const FactorMining: React.FC = () => {
                   <div className="rdagent-trace-section">
                     <div className="rdagent-trace-label">Experiment Inputs</div>
                     <Space wrap>
-                      {(round.input_base_factors || []).map((name) => <Tag key={`${round.round_index}-${name}`}>{name}</Tag>)}
-                      {!(round.input_base_factors || []).length ? <span className="text-hint">无基础因子上下文</span> : null}
+                      {getRDAgentRoundSnapshot(round).baseFactors.map((name) => <Tag key={`${round.round_index}-${name}`}>{name}</Tag>)}
+                      {!getRDAgentRoundSnapshot(round).baseFactors.length ? <span className="text-hint">无基础因子上下文</span> : null}
                     </Space>
                   </div>
                 </Col>
@@ -3169,9 +3204,9 @@ const FactorMining: React.FC = () => {
                   <div className="rdagent-trace-section">
                     <div className="rdagent-trace-label">Evaluation</div>
                     <Space wrap>
-                      <Tag color="green">Avg {Number(round.avg_score || 0).toFixed(1)}</Tag>
-                      <Tag>候选 {candidates.length}</Tag>
-                      <Tag color="cyan">保留 {round.retained_count || 0}</Tag>
+                      <Tag color="green">Avg {getRDAgentRoundSnapshot(round).avgScore.toFixed(1)}</Tag>
+                      <Tag>候选 {getRDAgentRoundSnapshot(round).candidateCount}</Tag>
+                      <Tag color="cyan">保留 {getRDAgentRoundSnapshot(round).retainedCount}</Tag>
                     </Space>
                     {evaluation.report_ref ? <div className="rdagent-trace-muted">{evaluation.report_ref}</div> : null}
                   </div>
@@ -3932,7 +3967,7 @@ const FactorMining: React.FC = () => {
             }
           : null;
         return (
-          <div>
+          <div className="rdagent-workspace-shell">
             <Alert
               type="info"
               showIcon
@@ -3949,7 +3984,7 @@ const FactorMining: React.FC = () => {
               style={{ marginBottom: 24 }}
             />
             {activeTab === "rdagent" ? (
-              <div style={{ marginBottom: 24 }}>
+              <div className="rdagent-workspace-overview">
                 {renderRDAgentOverviewPanel({
                   status: autoCampaignStatus,
                   elapsedSeconds: elapsedTime,
@@ -3964,15 +3999,14 @@ const FactorMining: React.FC = () => {
               </Row>
             )}
             <Progress percent={progressPercent} status="active" strokeColor="#3b82f6" />
-            <div className="chart-section" style={{ marginTop: 24 }}>
+            <div className="chart-section rdagent-workspace-chart">
               <h4 className="chart-title">{activeTab === "rdagent" ? "RDAgent 研究曲线" : "自动化研究曲线"}</h4>
               <div ref={progressChartRef} className="chart-container" style={{ height: 300 }} />
             </div>
             {activeTab === "rdagent" && (runningRDAgentRound || runningRDAgentCandidates.length) ? (
-              <div style={{ marginTop: 24 }}>
-                <Divider />
+              <div className="rdagent-workspace-trace">
                 {renderRDAgentRoundDigest(runningRDAgentRound as RDAgentTraceRound)}
-                <h3 className="result-title" style={{ marginTop: runningRDAgentRound ? 20 : 0 }}>当前 RDAgent 轮次证据</h3>
+                <h3 className="result-title" style={{ marginTop: runningRDAgentRound ? 20 : 0 }}>当前 Loop 证据</h3>
                 {runningRDAgentRound
                   ? renderRDAgentTrace([runningRDAgentRound as RDAgentTraceRound])
                   : (
@@ -4043,7 +4077,7 @@ const FactorMining: React.FC = () => {
             </Row>
 
             {isRDAgentResult ? (
-              <div style={{ marginBottom: 24 }}>
+              <div className="rdagent-workspace-overview">
                 {renderRDAgentOverviewPanel({
                   result: autoCampaignResult,
                   elapsedSeconds: elapsedTime,
@@ -4053,10 +4087,10 @@ const FactorMining: React.FC = () => {
             ) : null}
 
             <ResultSection
-              kicker={isRDAgentResult ? "运行概览" : "结果概览"}
-              title={activeTab === "rdagent" ? "RDAgent 研究结果" : "自动化研究结果"}
-              description={isRDAgentResult ? "先看最终结论和研究曲线，再到下方 Trace / 人工报告查看完整证据链。" : "先看最终产出和研究曲线，轮次细节放在下方。"}
-              extra={isRDAgentResult ? <Tag color="gold">Flow Summary</Tag> : undefined}
+              kicker={isRDAgentResult ? "Loop 面板" : "结果概览"}
+              title={activeTab === "rdagent" ? "RDAgent 运行结果" : "自动化研究结果"}
+              description={isRDAgentResult ? "保持配置工作台视角，先看当前轮结论和曲线，再展开 Trace。": "先看最终产出和研究曲线，轮次细节放在下方。"}
+              extra={isRDAgentResult ? <Tag color="gold">Workspace</Tag> : undefined}
             >
               {isRDAgentResult ? renderRDAgentRoundDigest(latestRDAgentRound) : null}
               <div className="chart-section" style={{ marginBottom: 0 }}>
@@ -4067,9 +4101,9 @@ const FactorMining: React.FC = () => {
 
             {isRDAgentResult ? (
               <ResultSection
-                kicker="研究细节"
-                title="RDAgent Trace 与后续动作"
-                description="Trace 保留每轮 hypothesis、experiment、evaluation 和 feedback；人工报告单独放一页，减少主视图压力。"
+                kicker="Loop 细节"
+                title="RDAgent Trace 与人工决策"
+                description="Trace 保留每轮 hypothesis、experiment、evaluation 和 feedback；人工报告单独放一页。"
               >
                 <Tabs
                   className="result-detail-tabs"

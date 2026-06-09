@@ -108,6 +108,16 @@
   min-width: 0;
 }
 
+.factor-mining-container .rdagent-workspace-shell,
+.factor-mining-container .rdagent-workspace-overview,
+.factor-mining-container .rdagent-workspace-trace {
+  min-width: 0;
+}
+
+.factor-mining-container .rdagent-workspace-chart {
+  margin-top: 24px;
+}
+
 .factor-mining-container .config-card .ant-card-head-title,
 .factor-mining-container .result-card .ant-card-head-title {
   font-weight: 600;
@@ -466,9 +476,9 @@
 }
 
 .factor-mining-container .rdagent-overview-panel {
-  padding: 20px;
-  background: linear-gradient(135deg, rgba(239, 246, 255, 0.96) 0%, rgba(248, 250, 252, 0.96) 52%, rgba(240, 249, 255, 0.96) 100%);
-  border: 1px solid rgba(59, 130, 246, 0.16);
+  padding: 18px;
+  background: linear-gradient(180deg, rgba(248, 250, 252, 0.96) 0%, rgba(255, 255, 255, 0.98) 100%);
+  border: 1px solid rgba(148, 163, 184, 0.16);
   border-radius: 18px;
 }
 
@@ -490,26 +500,26 @@
 }
 
 .factor-mining-container .rdagent-overview-title {
-  font-size: 22px;
+  font-size: 20px;
   font-weight: 700;
   color: #0f172a;
   margin-bottom: 6px;
 }
 
 .factor-mining-container .rdagent-overview-copy {
-  max-width: 720px;
-  font-size: 14px;
-  line-height: 1.7;
+  max-width: 680px;
+  font-size: 13px;
+  line-height: 1.65;
   color: #475569;
 }
 
 .factor-mining-container .rdagent-overview-badge {
-  min-width: 176px;
-  padding: 12px 14px;
+  min-width: 160px;
+  padding: 10px 12px;
   background: rgba(255, 255, 255, 0.82);
-  border: 1px solid rgba(59, 130, 246, 0.16);
+  border: 1px solid rgba(148, 163, 184, 0.18);
   border-radius: 14px;
-  box-shadow: 0 8px 20px rgba(59, 130, 246, 0.08);
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.04);
 }
 
 .factor-mining-container .rdagent-overview-badge-label {
@@ -531,16 +541,16 @@
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 12px;
-  margin-bottom: 18px;
+  margin-bottom: 14px;
 }
 
 .factor-mining-container .rdagent-stage {
   position: relative;
-  min-height: 112px;
-  padding: 16px 14px 14px;
+  min-height: 96px;
+  padding: 14px 12px 12px;
   border-radius: 14px;
-  border: 1px solid #dbeafe;
-  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(255, 255, 255, 0.9);
   transition: all 0.2s ease;
 }
 
@@ -560,8 +570,8 @@
 }
 
 .factor-mining-container .rdagent-stage-desc {
-  font-size: 12px;
-  line-height: 1.6;
+  font-size: 11px;
+  line-height: 1.55;
   color: #64748b;
 }
 
@@ -625,8 +635,8 @@
 }
 
 .factor-mining-container .rdagent-round-digest {
-  margin-bottom: 18px;
-  padding: 16px;
+  margin-bottom: 16px;
+  padding: 14px;
   background: linear-gradient(180deg, rgba(248, 250, 252, 0.92) 0%, rgba(255, 255, 255, 0.98) 100%);
   border: 1px solid rgba(148, 163, 184, 0.18);
   border-radius: 14px;
@@ -650,10 +660,12 @@
 }
 
 .factor-mining-container .rdagent-round-digest-copy {
-  font-size: 14px;
-  line-height: 1.6;
+  font-size: 13px;
+  line-height: 1.65;
   color: #475569;
   max-width: 720px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .factor-mining-container .rdagent-round-digest-grid {
@@ -683,6 +695,7 @@
   color: #334155;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .factor-mining-container .result-detail-tabs,
@@ -765,6 +778,8 @@
 .factor-mining-container .rdagent-trace-tags {
   display: flex;
   width: 100%;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .factor-mining-container .rdagent-trace-score {
@@ -780,7 +795,7 @@
 .factor-mining-container .rdagent-trace-section {
   min-width: 0;
   margin-bottom: 14px;
-  padding: 14px;
+  padding: 12px;
   border-radius: 12px;
   background: rgba(248, 250, 252, 0.92);
   border: 1px solid rgba(148, 163, 184, 0.16);
@@ -859,6 +874,12 @@
   color: #0f172a;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.factor-mining-container .rdagent-candidate .factor-expression {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: pre-wrap;
 }
 
 .factor-mining-container .rdagent-candidate-metrics {
