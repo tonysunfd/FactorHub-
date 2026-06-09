@@ -118,6 +118,8 @@ def test_rdagent_start_status_results_and_tasks(monkeypatch) -> None:
 
         assert status["data"]["status"] == "completed"
         assert status["data"]["retained_count"] == 1
+        assert status["data"]["request"]["max_iterations"] == 2
+        assert status["data"]["request"]["candidate_universe"] == ["close", "volume"]
         assert result["data"]["final_round_result"]["factors"][0]["expression"] == "rank(close)"
         assert result["data"]["continue_mining_request"]["objective"] == "继续优化量价共振因子"
         assert tasks["data"][0]["task_id"] == task_id

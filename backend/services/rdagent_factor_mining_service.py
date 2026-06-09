@@ -502,15 +502,28 @@ class RDAgentFactorMiningService:
     ) -> str:
         latest_feedback = rounds[-1].get("feedback") if rounds else {}
         latest_evaluation = rounds[-1].get("evaluation") if rounds else {}
+        acceptance_policy = self._serialize_acceptance_policy(config.acceptance_policy)
         return (
             f"研究目标：{config.objective}\n"
             f"当前轮次：{iteration}\n"
+            f"总轮数预算：{max(1, min(int(config.max_iterations or 1), MAX_RDAGENT_ITERATIONS))}\n"
             f"优化方向：{config.direction or 'score'}\n"
+            f"回测区间：{config.start_date} 至 {config.end_date}\n"
+            f"股票池：{config.universe}\n"
+            f"基准：{config.benchmark}\n"
+            f"分组数：{config.n_groups}\n"
+            f"持有期：{config.holding_period}\n"
+            f"行业中性化：{'是' if config.neutralize_industry else '否'}\n"
+            f"市值中性化：{'是' if config.neutralize_cap else '否'}\n"
             f"基础因子：{json.dumps(current_base_factors, ensure_ascii=False)}\n"
             f"候选字段：{json.dumps(config.candidate_universe, ensure_ascii=False)}\n"
+            f"候选数量预算：本轮最多生成 {max(int(config.candidates_per_iteration or 1), 1)} 条候选表达式\n"
+            f"验收阈值：{json.dumps(acceptance_policy, ensure_ascii=False)}\n"
+            f"延续任务：{config.continuation_of or '否'}\n"
+            f"上一轮反馈 ID：{config.previous_feedback_id or '无'}\n"
             f"上一轮反馈：{json.dumps(latest_feedback or {}, ensure_ascii=False)}\n"
             f"上一轮评估：{json.dumps(latest_evaluation or {}, ensure_ascii=False)}\n"
-            "请输出下一轮 RDAgent 因子研究假设。"
+            "请严格围绕以上预算、验收阈值和研究边界输出下一轮 RDAgent 因子研究假设，避免提出无法通过当前阈值的宽泛方案。"
         )
 
     def _build_experiment_prompt(
@@ -523,16 +536,38 @@ class RDAgentFactorMiningService:
         current_base_factors: list[str],
         known_expressions: list[str],
     ) -> str:
+        acceptance_policy = self._serialize_acceptance_policy(config.acceptance_policy)
         return (
             f"研究目标：{config.objective}\n"
             f"当前轮次：{iteration}\n"
+            f"总轮数预算：{max(1, min(int(config.max_iterations or 1), MAX_RDAGENT_ITERATIONS))}\n"
             f"研究假设：{json.dumps(hypothesis, ensure_ascii=False)}\n"
+            f"回测区间：{config.start_date} 至 {config.end_date}\n"
+            f"股票池：{config.universe}\n"
+            f"基准：{config.benchmark}\n"
+            f"分组数：{config.n_groups}\n"
+            f"持有期：{config.holding_period}\n"
+            f"行业中性化：{'是' if config.neutralize_industry else '否'}\n"
+            f"市值中性化：{'是' if config.neutralize_cap else '否'}\n"
             f"基础因子：{json.dumps(current_base_factors, ensure_ascii=False)}\n"
             f"候选字段：{json.dumps(config.candidate_universe, ensure_ascii=False)}\n"
+            f"验收阈值：{json.dumps(acceptance_policy, ensure_ascii=False)}\n"
             f"历史表达式（禁止重复）：{json.dumps(known_expressions[-20:], ensure_ascii=False)}\n"
             f"表达式契约：{rdagent_expression_contract_text()}\n"
             f"需要生成 {max(int(config.candidates_per_iteration or 1), 1)} 条候选表达式。"
+            "请只生成在当前候选字段范围内、且有机会满足验收阈值的表达式。"
         )
+
+    @staticmethod
+    def _serialize_acceptance_policy(policy: Any) -> dict[str, float]:
+        raw = dict(policy or {})
+        return {
+            "max_correlation_with_sota": _safe_float(raw.get("max_correlation_with_sota"), 0.99),
+            "min_rank_ic": _safe_float(raw.get("min_rank_ic"), 0.0),
+            "min_annualized_return_delta": _safe_float(raw.get("min_annualized_return_delta"), 0.0),
+            "max_drawdown_regression": _safe_float(raw.get("max_drawdown_regression"), 0.05),
+            "min_valid_coverage": _safe_float(raw.get("min_valid_coverage"), 0.8),
+        }
 
     def _call_llm_json(self, *, system_prompt: str, user_prompt: str) -> dict[str, Any]:
         runtime_config = llm_config_service.get_runtime_config()

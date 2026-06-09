@@ -170,3 +170,59 @@ def test_rdagent_service_falls_back_when_llm_output_invalid(monkeypatch) -> None
     )
 
     assert result["rounds"][0]["experiment"]["factor_formulations"], "应回退到内置表达式模板"
+
+
+def test_rdagent_prompts_include_runtime_constraints() -> None:
+    service = RDAgentFactorMiningService(auto_mining_service=_FakeAutoMiningService())
+    config = RDAgentMiningConfig(
+        task_id="rdagent-test",
+        objective="提升收益并控制回撤",
+        max_iterations=4,
+        candidates_per_iteration=2,
+        base_factors=["AlphaVolume"],
+        candidate_universe=["close", "volume"],
+        start_date="2024-01-01",
+        end_date="2024-03-31",
+        universe="hs300",
+        benchmark="000300.SH",
+        n_groups=10,
+        holding_period=7,
+        direction="report_sharpe",
+        neutralize_industry=False,
+        neutralize_cap=True,
+        continuation_of="parent-task",
+        previous_feedback_id="feedback-1",
+        acceptance_policy={
+            "max_correlation_with_sota": 0.35,
+            "min_rank_ic": 0.06,
+            "min_annualized_return_delta": 0.12,
+            "max_drawdown_regression": 0.03,
+            "min_valid_coverage": 0.9,
+        },
+    )
+
+    hypothesis_prompt = service._build_hypothesis_prompt(
+        config=config,
+        rounds=[{"feedback": {"observations": "上一轮回撤偏大"}, "evaluation": {"best_score": 81.0}}],
+        iteration=2,
+        current_base_factors=["AlphaVolume"],
+    )
+    experiment_prompt = service._build_experiment_prompt(
+        config=config,
+        hypothesis={"statement": "增强量价协同并抑制回撤"},
+        rounds=[],
+        iteration=2,
+        current_base_factors=["AlphaVolume"],
+        known_expressions=["rank(ts_delta(close, 5))"],
+    )
+
+    for prompt in (hypothesis_prompt, experiment_prompt):
+        assert "总轮数预算：4" in prompt
+        assert "回测区间：2024-01-01 至 2024-03-31" in prompt
+        assert "股票池：hs300" in prompt
+        assert "基准：000300.SH" in prompt
+        assert '"min_rank_ic": 0.06' in prompt
+        assert '"max_correlation_with_sota": 0.35' in prompt
+
+    assert "候选数量预算：本轮最多生成 2 条候选表达式" in hypothesis_prompt
+    assert "需要生成 2 条候选表达式" in experiment_prompt

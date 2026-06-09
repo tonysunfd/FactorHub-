@@ -290,6 +290,7 @@ def _normalize_rdagent_factor_list(factors: list[str], max_count: int) -> list[s
 def _build_rdagent_status_payload(task_id: str, task: dict[str, Any]) -> dict[str, Any]:
     payload = build_auto_campaign_status(task_id, task)
     payload["cancel_requested"] = bool(task.get("cancel_requested"))
+    payload["request"] = task.get("request") or {}
     return payload
 
 

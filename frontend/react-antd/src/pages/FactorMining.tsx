@@ -1513,6 +1513,21 @@ const FactorMining: React.FC = () => {
       }
 
       const rawStatus = statusResponse.data as AutoCampaignStatus;
+      const restoredRequest = (rawStatus as any)?.request || {};
+      if (restoredRequest && Object.keys(restoredRequest).length) {
+        rdAgentForm.setFieldsValue({
+          ...restoredRequest,
+          dateRange:
+            restoredRequest.start_date && restoredRequest.end_date
+              ? [dayjs(restoredRequest.start_date), dayjs(restoredRequest.end_date)]
+              : undefined,
+          max_correlation_with_sota: restoredRequest.acceptance_policy?.max_correlation_with_sota,
+          min_rank_ic: restoredRequest.acceptance_policy?.min_rank_ic,
+          min_annualized_return_delta: restoredRequest.acceptance_policy?.min_annualized_return_delta,
+          max_drawdown_regression: restoredRequest.acceptance_policy?.max_drawdown_regression,
+          min_valid_coverage: restoredRequest.acceptance_policy?.min_valid_coverage,
+        });
+      }
       const status = {
         ...rawStatus,
         candidates: (rawStatus.candidates || []).map((factor: any) =>
