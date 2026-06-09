@@ -3166,7 +3166,7 @@ const FactorMining: React.FC = () => {
         <div>
           <div className="auto-mode-title">研究模式</div>
           <div className="auto-mode-copy">
-            自动挖掘统一使用同一个入口：先配置基础因子和研究目标，再选择是做单轮验证，还是让系统连续探索并合并展示 QuantGPT 与 FactorHub 报告。
+            先定研究目标，再选择单轮验证或连续探索。
           </div>
         </div>
         <Segmented
@@ -3178,7 +3178,7 @@ const FactorMining: React.FC = () => {
               label: (
                 <div className="auto-mode-option">
                   <div className="auto-mode-option-title">单轮研究</div>
-                  <div className="auto-mode-option-copy">快速生成一轮候选并验证报告</div>
+                  <div className="auto-mode-option-copy">快速生成并验证一轮候选</div>
                 </div>
               ),
               value: "single",
@@ -3187,7 +3187,7 @@ const FactorMining: React.FC = () => {
               label: (
                 <div className="auto-mode-option">
                   <div className="auto-mode-option-title">连续探索</div>
-                  <div className="auto-mode-option-copy">多轮迭代筛选并保留最终候选</div>
+                  <div className="auto-mode-option-copy">多轮迭代后保留最终候选</div>
                 </div>
               ),
               value: "campaign",
@@ -3285,7 +3285,7 @@ const FactorMining: React.FC = () => {
                 <div>
                   <div className="rdagent-bootstrap-mode-title">字段与基础因子来源</div>
                   <div className="rdagent-bootstrap-mode-desc">
-                    候选字段决定 `LLM` 可用输入空间；基础因子会作为研究上下文输入，不是每次都从零开始。
+                    候选字段决定 `LLM` 的输入范围；基础因子会作为研究起点。
                   </div>
                 </div>
                 <Segmented
@@ -3305,7 +3305,7 @@ const FactorMining: React.FC = () => {
                     </Button>
                   </Form.Item>
                   <div className="text-hint" style={{ marginBottom: 12 }}>
-                    先根据目标自动挑选最小充分字段集合，再从因子库导入一组更合适的基础因子作为起点。
+                    先自动挑字段，再给出一组更合适的起始因子。
                   </div>
                   {renderRDAgentBootstrapSummary()}
                 </div>
@@ -3383,7 +3383,7 @@ const FactorMining: React.FC = () => {
             </Form.Item>
             {rdagentBootstrapMode === "llm_auto" ? (
               <div className="text-hint" style={{ marginTop: -8, marginBottom: 12 }}>
-                自动模式生成后，你仍然可以在这里继续删改字段和基础因子。
+                自动生成后仍可继续手动调整。
               </div>
             ) : null}
             <Form.Item label="SOTA 分类 ID" name="sota_library_id">
