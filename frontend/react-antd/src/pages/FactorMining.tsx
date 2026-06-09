@@ -296,6 +296,8 @@ interface RDAgentTraceRound {
   round_index: number;
   task_id: string;
   hypothesis?: Record<string, any>;
+  experiment?: Record<string, any>;
+  coded_experiment?: Record<string, any>;
   candidates?: AutoFactor[];
   evaluation?: Record<string, any>;
   feedback?: Record<string, any>;
@@ -2796,13 +2798,13 @@ const FactorMining: React.FC = () => {
     if (status.includes("cli_starting")) return "内部 RDAgent Loop 启动";
     if (status.includes("cli_completed")) return "内部 RDAgent Loop 完成";
     if (status.includes("cli_failed")) return "内部 RDAgent Loop 失败";
-    if (status.includes("hypothesis")) return "Hypothesis 生成研究假设";
-    if (status.includes("experiment")) return "Experiment 生成 factor tasks";
-    if (status.includes("coding")) return "Coding 承接表达式实现";
-    if (status.includes("running")) return "Running 回测与评分";
+    if (status.includes("hypothesis")) return "Research 生成研究假设";
+    if (status.includes("experiment")) return "Design Experiment 生成任务";
+    if (status.includes("coding")) return "Implementation 映射实现";
+    if (status.includes("running")) return "Evaluation 回测与评分";
     if (status.includes("feedback")) return "Feedback 反馈优化";
-    if (status.includes("trace")) return "Trace 完成并沉淀结果";
-    if (status.includes("completed")) return "Trace 完成并沉淀结果";
+    if (status.includes("trace")) return "Trace 沉淀结果";
+    if (status.includes("completed")) return "Trace 沉淀结果";
     if (status.includes("failed")) return "Failed 执行失败";
     return "Pending 等待启动";
   };
@@ -2819,12 +2821,12 @@ const FactorMining: React.FC = () => {
       stageKeys.findIndex((key) => String(normalizedStage || "").includes(key)),
     );
     return [
-      { key: "hypothesis", title: "Hypothesis", description: "从目标和反馈生成下一轮研究假设" },
-      { key: "experiment", title: "Experiment", description: "LLM 根据 hypothesis 生成 factor tasks" },
-      { key: "coding", title: "Coding", description: "映射为 FactorHub 可计算表达式" },
-      { key: "running", title: "Running", description: "复用回测/评分体系计算指标" },
+      { key: "hypothesis", title: "Research", description: "基于目标和反馈生成下一轮 hypothesis" },
+      { key: "experiment", title: "Design Experiment", description: "把 hypothesis 展开成 experiment tasks" },
+      { key: "coding", title: "Implementation", description: "映射为 FactorHub 可计算表达式" },
+      { key: "running", title: "Evaluation", description: "复用统一回测/评分体系计算指标" },
       { key: "feedback", title: "Feedback", description: "根据阈值接收或拒绝候选" },
-      { key: "trace", title: "Trace", description: "沉淀 SOTA 候选与下一轮线索" },
+      { key: "trace", title: "Trace", description: "沉淀候选、证据与下一轮线索" },
     ].map((stage, index) => ({
       ...stage,
       state: index < activeIndex ? "done" : index === activeIndex ? "active" : "pending",
@@ -3116,6 +3118,7 @@ const FactorMining: React.FC = () => {
     if (!round) return null;
 
     const hypothesis = round.hypothesis || {};
+    const experiment = round.experiment || {};
     const feedback = round.feedback || {};
     const snapshot = getRDAgentRoundSnapshot(round);
     const nextHypothesis = String(feedback.next_hypothesis || "").trim();
@@ -3144,12 +3147,17 @@ const FactorMining: React.FC = () => {
             <div className="rdagent-round-digest-text">{hypothesis.statement || "暂无研究假设"}</div>
           </div>
           <div className="rdagent-round-digest-card">
-            <div className="rdagent-round-digest-label">Feedback</div>
-            <div className="rdagent-round-digest-text">{feedback.observations || "暂无反馈摘要"}</div>
+            <div className="rdagent-round-digest-label">Experiment</div>
+            <div className="rdagent-round-digest-text">
+              {String(experiment.hypothesis_summary || "").trim()
+                || (Array.isArray(experiment.factor_formulations) && experiment.factor_formulations.length
+                  ? `生成 ${experiment.factor_formulations.length} 个实验候选`
+                  : "暂无实验规划摘要")}
+            </div>
           </div>
           <div className="rdagent-round-digest-card">
-            <div className="rdagent-round-digest-label">Next Trace</div>
-            <div className="rdagent-round-digest-text">{nextHypothesis || "本轮暂无下一轮假设，Trace 中查看完整证据。"}</div>
+            <div className="rdagent-round-digest-label">Feedback</div>
+            <div className="rdagent-round-digest-text">{feedback.observations || nextHypothesis || "暂无反馈摘要"}</div>
           </div>
         </div>
       </div>
@@ -3167,6 +3175,7 @@ const FactorMining: React.FC = () => {
         defaultActiveKey={rounds.length ? [`round-${rounds.length}`] : []}
         items={rounds.map((round) => {
           const hypothesis = round.hypothesis || {};
+          const experiment = round.experiment || {};
           const feedback = round.feedback || {};
           const evaluation = round.evaluation || {};
           const candidates = round.candidates || round.all_factors || [];
@@ -3211,7 +3220,7 @@ const FactorMining: React.FC = () => {
                     onChange={(value) => setRdagentTraceDetailTab((prev) => ({ ...prev, [roundKey]: value as RDAgentTraceDetailTab }))}
                     options={[
                       { label: "Research", value: "research" },
-                      { label: "Development", value: "development" },
+                      { label: "Experiment", value: "development" },
                       { label: "Feedback", value: "feedback" },
                     ]}
                   />
@@ -3234,8 +3243,11 @@ const FactorMining: React.FC = () => {
                 <Row gutter={[12, 12]}>
                   <Col xs={24} md={12}>
                     <div className="rdagent-trace-section">
-                      <div className="rdagent-trace-label">Experiment Inputs</div>
-                      <Space wrap>
+                      <div className="rdagent-trace-label">Design Experiment</div>
+                      <div className="rdagent-trace-text">
+                        {String(experiment.hypothesis_summary || "").trim() || "当前轮尚未返回 experiment 摘要。"}
+                      </div>
+                      <Space wrap style={{ marginTop: 10 }}>
                         {getRDAgentRoundSnapshot(round).baseFactors.map((name) => <Tag key={`${round.round_index}-${name}`}>{name}</Tag>)}
                         {!getRDAgentRoundSnapshot(round).baseFactors.length ? <span className="text-hint">无基础因子上下文</span> : null}
                       </Space>
@@ -3243,8 +3255,12 @@ const FactorMining: React.FC = () => {
                   </Col>
                   <Col xs={24} md={12}>
                     <div className="rdagent-trace-section">
-                      <div className="rdagent-trace-label">Workspace Summary</div>
-                      <div className="rdagent-trace-text">{workspaceSummary || "当前轮尚未返回可展开的实现摘要。"}</div>
+                      <div className="rdagent-trace-label">Experiment Tasks</div>
+                      <div className="rdagent-trace-text">
+                        {Array.isArray(experiment.factor_formulations) && experiment.factor_formulations.length
+                          ? experiment.factor_formulations.join("\n")
+                          : workspaceSummary || "当前轮尚未返回可展开的 experiment tasks。"}
+                      </div>
                     </div>
                   </Col>
                 </Row>
@@ -3585,20 +3601,21 @@ const FactorMining: React.FC = () => {
           </Button>
           <div className="rdagent-config-toolbar">
             <div className="rdagent-mini-summary">
-              <span className="rdagent-mini-summary-label">配置流程</span>
+              <span className="rdagent-mini-summary-label">Workspace</span>
+              <div className="rdagent-mini-summary-head">
+                <strong>这是配置工作台，不是说明页。</strong>
+                <span>先设目标与研究边界，再看右侧 Loop 和 Trace。</span>
+              </div>
               <div className="rdagent-mini-summary-tags">
-                <Tag color="blue">先定目标</Tag>
-                <Tag color="cyan">再定字段与基础因子</Tag>
-                <Tag color="purple">最后定 Loop 与阈值</Tag>
+                <Tag color="blue">Objective</Tag>
+                <Tag color="cyan">Universe</Tag>
+                <Tag color="purple">Loop</Tag>
+                <Tag color="gold">Threshold</Tag>
               </div>
             </div>
-            <Alert
-              type="info"
-              showIcon
-              className="rdagent-config-note"
-              message="表达式约束已内置"
-              description="字段、窗口函数和常见别名会自动规范化；如果仍然无法解析，结果区会直接显示失败原因。"
-            />
+            <div className="rdagent-config-note">
+              表达式契约、字段别名和失败原因都会在右侧 Trace 中落盘展示。
+            </div>
           </div>
           <Form form={rdAgentForm} layout="vertical" onFinish={startRDAgentMining}>
             <Collapse
@@ -3647,7 +3664,7 @@ const FactorMining: React.FC = () => {
                     <div>
                       <div className="rdagent-bootstrap-mode-title">字段与基础因子来源</div>
                       <div className="rdagent-bootstrap-mode-desc">
-                        候选字段决定 `LLM` 的输入范围；基础因子会作为研究起点。
+                        决定当前 round 的输入边界和研究起点。
                       </div>
                     </div>
                     <Segmented
@@ -3667,7 +3684,7 @@ const FactorMining: React.FC = () => {
                         </Button>
                       </Form.Item>
                       <div className="text-hint" style={{ marginBottom: 12 }}>
-                        先自动挑字段，再给出一组更合适的起始因子。
+                        自动生成一份 bootstrap，仍可继续手动改。
                       </div>
                       {renderRDAgentBootstrapSummary()}
                     </div>
@@ -3677,7 +3694,7 @@ const FactorMining: React.FC = () => {
                       showIcon
                       style={{ marginBottom: 16 }}
                       message="当前为手动配置"
-                      description="你自己决定字段 Universe 和基础因子；RDAgent 会在这组边界内继续生成与优化。"
+                      description="字段 Universe 和基础因子完全由你指定，RDAgent 只在这组边界内继续探索。"
                     />
                   )}
                 </div>

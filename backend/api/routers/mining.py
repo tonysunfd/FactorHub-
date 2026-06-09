@@ -28,6 +28,7 @@ from backend.api.routers.mining_progress import (
     build_mining_status_payload,
     finalize_task_result,
     normalize_fitness_history,
+    sanitize_payload,
     update_task_from_candidates,
     update_task_progress,
 )
@@ -67,6 +68,17 @@ class AutoMiningFactorSelectionRequest(BaseModel):
     max_factor_count: int = 12
     candidate_limit: int = 80
     selection_mode: str = "auto"
+
+
+class ManualMiningFactorSelectionRequest(BaseModel):
+    prompt: str
+    direction: Optional[str] = "report_sharpe"
+    stock_code: str = ""
+    start_date: str
+    end_date: str
+    fitness_objective: str = "ic_mean"
+    max_factor_count: int = 8
+    candidate_limit: int = 80
 
 
 class AutoMiningRequest(BaseModel):
@@ -320,6 +332,12 @@ def _build_rdagent_round_from_service(round_item: dict[str, Any], task_id: str) 
             "reason": hypothesis.get("reason"),
             "research_direction": hypothesis.get("research_direction") or hypothesis.get("target_goal"),
             "expected_signal": hypothesis.get("expected_signal"),
+        },
+        "experiment": {
+            "hypothesis_summary": experiment.get("hypothesis_summary") or hypothesis.get("statement") or hypothesis.get("summary"),
+            "factor_formulations": list(experiment.get("factor_formulations") or []),
+            "base_factors": list(experiment.get("base_factors") or hypothesis.get("base_factors") or []),
+            "evaluation_focus": experiment.get("evaluation_focus"),
         },
         "evaluation": {
             **evaluation,
@@ -582,7 +600,8 @@ async def _run_auto_campaign(task_id: str, request: AutoMiningCampaignRequest):
             mining_tasks[task_id]["rounds"] = snapshot.get("rounds", [])
             mining_tasks[task_id]["retained_count"] = snapshot.get("retained_count", 0)
 
-        campaign_result = auto_factor_mining_service.run_auto_campaign(
+        campaign_result = await asyncio.to_thread(
+            auto_factor_mining_service.run_auto_campaign,
             prompt=request.prompt,
             base_factors=request.base_factors,
             start_date=request.start_date,
@@ -651,6 +670,41 @@ async def select_auto_mining_factors(request: AutoMiningFactorSelectionRequest):
             "success": True,
             "data": result,
             "message": f"已筛选 {len(result['selected_factors'])} 个基础因子",
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/manual/select-factors")
+async def select_manual_mining_factors(request: ManualMiningFactorSelectionRequest):
+    """为手动遗传挖掘筛选基础因子。"""
+    try:
+        stock_code = str(request.stock_code or "").strip()
+        fitness_objective = str(request.fitness_objective or "ic_mean").strip() or "ic_mean"
+        extra_context_parts = [
+            "当前场景：单股票手动遗传挖掘。",
+            f"当前遗传优化目标：{fitness_objective}。",
+        ]
+        if stock_code:
+            extra_context_parts.append(f"当前目标股票代码：{stock_code}。")
+        result = auto_factor_mining_service.select_factors(
+            prompt=request.prompt,
+            max_factor_count=request.max_factor_count,
+            candidate_limit=request.candidate_limit,
+            selection_mode="manual_genetic",
+            direction=request.direction,
+            start_date=request.start_date,
+            end_date=request.end_date,
+            universe="single_stock",
+            benchmark="hs300",
+            extra_context="\n".join(extra_context_parts),
+        )
+        if not bool(result.get("llm_used")):
+            raise RuntimeError("手动因子挖掘的因子筛选未触发真实 LLM 调用，请检查 LLM 配置或后端链路。")
+        return {
+            "success": True,
+            "data": result,
+            "message": f"已筛选 {len(result['selected_factors'])} 个手动挖掘基础因子",
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -1230,7 +1284,7 @@ async def get_auto_mining_campaign_results(task_id: str):
     task = mining_tasks[task_id]
     if task["status"] != "completed":
         raise HTTPException(status_code=400, detail=f"任务尚未完成，当前状态: {task['status']}")
-    return {"success": True, "data": task["result"]}
+    return {"success": True, "data": sanitize_payload(task["result"])}
 
 
 @router.get("/rdagent/status/{task_id}")
