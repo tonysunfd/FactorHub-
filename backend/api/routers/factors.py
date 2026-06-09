@@ -106,19 +106,46 @@ async def get_factor(factor_id: int):
     """获取因子详情"""
     try:
         factor_service = service_attr("backend.services.factor_service", "factor_service")
-        # 这里需要实现获取单个因子的逻辑
-        factors = factor_service.get_all_factors()
-        factor = next((f for f in factors if f.get("id") == factor_id), None)
-
-        if not factor:
-            raise HTTPException(status_code=404, detail="因子不存在")
-
+        factor = factor_service.get_factor_detail(factor_id)
         return {
             "success": True,
             "data": factor
         }
-    except HTTPException:
-        raise
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{factor_id}/snapshots")
+async def list_factor_snapshots(factor_id: int):
+    """获取因子任务快照列表"""
+    try:
+        factor_service = service_attr("backend.services.factor_service", "factor_service")
+        snapshots = factor_service.list_factor_task_snapshots(factor_id)
+        return {
+            "success": True,
+            "data": snapshots,
+            "total": len(snapshots),
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{factor_id}/snapshots/{snapshot_id}")
+async def get_factor_snapshot(factor_id: int, snapshot_id: int):
+    """获取单个因子任务快照"""
+    try:
+        factor_service = service_attr("backend.services.factor_service", "factor_service")
+        snapshot = factor_service.get_factor_task_snapshot(factor_id, snapshot_id)
+        return {
+            "success": True,
+            "data": snapshot,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -915,8 +915,46 @@ class FactorService:
         db = get_db_session()
         repo = FactorRepository(db)
         factors = repo.get_all(active_only=True)
+        result = []
+        for factor in factors:
+            item = factor.to_dict()
+            task_metadata = item.get("task_metadata") or {}
+            if task_metadata:
+                item["task_snapshots"] = [{
+                    "id": 1,
+                    "factor_id": factor.id,
+                    "task_id": task_metadata.get("task_id"),
+                    "source": task_metadata.get("source") or "legacy_task_metadata",
+                    "snapshot_type": "research",
+                    "payload": task_metadata,
+                    "created_at": item.get("updated_at") or item.get("created_at"),
+                }]
+                item["latest_task_snapshot"] = item["task_snapshots"][0]
+            else:
+                item["task_snapshots"] = []
+            result.append(item)
         db.close()
-        return [f.to_dict() for f in factors]
+        return result
+
+    def get_factor_detail(self, factor_id: int) -> Dict:
+        """获取单个因子详情"""
+        factor = next((f for f in self.get_all_factors() if f.get("id") == factor_id), None)
+        if not factor:
+            raise ValueError(f"因子ID {factor_id} 不存在")
+        return factor
+
+    def list_factor_task_snapshots(self, factor_id: int) -> List[Dict]:
+        """列出因子任务快照，兼容当前仅存于 task_metadata 的历史数据。"""
+        factor = self.get_factor_detail(factor_id)
+        return factor.get("task_snapshots") or []
+
+    def get_factor_task_snapshot(self, factor_id: int, snapshot_id: int) -> Dict:
+        """获取单个因子任务快照。"""
+        snapshots = self.list_factor_task_snapshots(factor_id)
+        snapshot = next((item for item in snapshots if int(item.get("id") or 0) == snapshot_id), None)
+        if not snapshot:
+            raise ValueError(f"快照ID {snapshot_id} 不存在")
+        return snapshot
 
     def get_factor_stats(self) -> Dict:
         """获取因子统计信息"""
