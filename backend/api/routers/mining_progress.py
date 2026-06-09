@@ -6,6 +6,28 @@ from typing import Any, Callable
 FitnessHistory = dict[str, list[float]]
 
 
+def _strip_control_chars(value: str) -> str:
+    return "".join(
+        ch for ch in str(value)
+        if ch in ("\t", "\n", "\r") or ord(ch) >= 32
+    )
+
+
+def sanitize_payload(value: Any) -> Any:
+    if isinstance(value, str):
+        return _strip_control_chars(value)
+    if isinstance(value, list):
+        return [sanitize_payload(item) for item in value]
+    if isinstance(value, tuple):
+        return [sanitize_payload(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            sanitize_payload(key) if isinstance(key, str) else key: sanitize_payload(item)
+            for key, item in value.items()
+        }
+    return value
+
+
 def empty_fitness_history() -> FitnessHistory:
     return {"best": [], "average": []}
 
@@ -129,7 +151,7 @@ def build_mining_status_payload(task_id: str, task: dict[str, Any]) -> dict[str,
 
     response_data["candidates"] = task.get("candidates", [])
     response_data["round_evaluation"] = task.get("round_evaluation")
-    return response_data
+    return sanitize_payload(response_data)
 
 
 def build_auto_campaign_status(task_id: str, task: dict[str, Any]) -> dict[str, Any]:
@@ -140,4 +162,4 @@ def build_auto_campaign_status(task_id: str, task: dict[str, Any]) -> dict[str, 
     payload["upstream_status"] = task.get("upstream_status")
     payload["rounds"] = task.get("rounds", [])
     payload["latest_round"] = task.get("latest_round")
-    return payload
+    return sanitize_payload(payload)

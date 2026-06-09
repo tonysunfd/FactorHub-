@@ -33,10 +33,13 @@ class ExpressionAdapter:
 
         expr = cls._replace_np_log(expr)
         expr = cls._replace_dataframe_column_refs(expr)
+        expr = cls._replace_clip_upper_lower(expr)
+        expr = cls._replace_obv(expr)
         expr = cls._replace_shift(expr)
         expr = cls._replace_pct_change(expr)
         expr = cls._replace_rolling_mean(expr)
         expr = cls._replace_rolling_std(expr)
+        expr = cls._replace_chained_rolling_aggregations(expr)
         expr = cls._replace_sma(expr)
         expr = cls._replace_hhv_llv(expr)
         expr = cls._replace_qlib_field_prefix(expr)
@@ -54,8 +57,29 @@ class ExpressionAdapter:
         return expr
 
     @staticmethod
+    def _replace_clip_upper_lower(expr: str) -> str:
+        expr = re.sub(
+            r"([A-Za-z0-9_\.\(\)\+\-\*/,\s]+?)\.clip\(\s*upper\s*=\s*([^)]+)\)",
+            r"clip(\1,-999999,\2)",
+            expr,
+        )
+        expr = re.sub(
+            r"([A-Za-z0-9_\.\(\)\+\-\*/,\s]+?)\.clip\(\s*lower\s*=\s*([^)]+)\)",
+            r"clip(\1,\2,999999)",
+            expr,
+        )
+        return expr
+
+    @staticmethod
+    def _replace_obv(expr: str) -> str:
+        expr = re.sub(r"\bOBV\s*\(\s*close\s*,\s*volume\s*\)", "obv(close,20)", expr, flags=re.IGNORECASE)
+        return expr
+
+    @staticmethod
     def _replace_shift(expr: str) -> str:
-        return re.sub(r"\b([A-Za-z_][A-Za-z0-9_]*)\.shift\((\d+)\)", r"ts_shift(\1,\2)", expr)
+        expr = re.sub(r"\b([A-Za-z_][A-Za-z0-9_]*)\.shift\((\d+)\)", r"ts_shift(\1,\2)", expr)
+        expr = re.sub(r"(\b[a-z_][a-z0-9_]*\([^()]+\))\.shift\((\d+)\)", r"ts_shift(\1,\2)", expr, flags=re.IGNORECASE)
+        return expr
 
     @staticmethod
     def _replace_pct_change(expr: str) -> str:
@@ -82,6 +106,62 @@ class ExpressionAdapter:
             r"ts_std(\1,\2)",
             expr,
         )
+
+    @classmethod
+    def _replace_chained_rolling_aggregations(cls, expr: str) -> str:
+        patterns = [
+            re.compile(r"\.rolling\(\s*window\s*=\s*(\d+)\s*\)\.(mean|std)\(\)"),
+            re.compile(r"\.rolling\(\s*(\d+)\s*\)\.(mean|std)\(\)"),
+        ]
+
+        for pattern in patterns:
+            while True:
+                match = pattern.search(expr)
+                if not match:
+                    break
+
+                left_start = cls._find_left_expression_start(expr, match.start())
+                if left_start is None:
+                    break
+
+                left_expr = expr[left_start:match.start()].strip()
+                if not left_expr:
+                    break
+
+                window = match.group(1)
+                agg = match.group(2)
+                func_name = "ts_mean" if agg == "mean" else "ts_std"
+                replacement = f"{func_name}({left_expr},{window})"
+                expr = expr[:left_start] + replacement + expr[match.end():]
+        return expr
+
+    @staticmethod
+    def _find_left_expression_start(expr: str, end_idx: int) -> int | None:
+        index = end_idx - 1
+        while index >= 0 and expr[index].isspace():
+            index -= 1
+        if index < 0:
+            return None
+
+        if expr[index] == ")":
+            depth = 0
+            for left in range(index, -1, -1):
+                char = expr[left]
+                if char == ")":
+                    depth += 1
+                elif char == "(":
+                    depth -= 1
+                    if depth == 0:
+                        start = left
+                        while start > 0 and (expr[start - 1].isalnum() or expr[start - 1] == "_"):
+                            start -= 1
+                        return start
+            return None
+
+        start = index
+        while start >= 0 and (expr[start].isalnum() or expr[start] in "._"):
+            start -= 1
+        return start + 1
 
     @staticmethod
     def _replace_sma(expr: str) -> str:

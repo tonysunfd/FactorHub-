@@ -11,6 +11,18 @@ class ValidationService:
 
     async def validate_expression(self, expression: str, mode: str = "local") -> ValidationResponse:
         adapted_expression = ExpressionAdapter.adapt(expression)
+        if mode == "local" and not self.client.is_configured():
+            return ValidationResponse(
+                success=True,
+                valid=True,
+                mode=mode,
+                message="OK: 本地模式未配置 QuantGPT 上游，直接允许本地执行预检。",
+                raw={
+                    "input_expression": expression,
+                    "adapted_expression": adapted_expression,
+                    "bypassed_remote_validation": True,
+                },
+            )
         message = await self.client.validate_expression(adapted_expression, mode)
         valid = message.startswith("OK")
         return ValidationResponse(

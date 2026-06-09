@@ -11,6 +11,8 @@ export type BackendControlResponse = {
   error?: string
 }
 
+const backendPort = String(import.meta.env.VITE_BACKEND_PORT || '8001')
+
 const resolveBackendControlBase = () => {
   if (typeof window === 'undefined') {
     return 'http://127.0.0.1:5173'
@@ -19,12 +21,16 @@ const resolveBackendControlBase = () => {
   return `${window.location.protocol}//${host}:5173`
 }
 
-const resolveBackendHealthUrl = () => {
+export const resolveBackendBaseUrl = () => {
   if (typeof window === 'undefined') {
-    return 'http://127.0.0.1:8001/health'
+    return `http://127.0.0.1:${backendPort}`
   }
   const host = window.location.hostname || '127.0.0.1'
-  return `${window.location.protocol}//${host}:8001/health`
+  return `${window.location.protocol}//${host}:${backendPort}`
+}
+
+const resolveBackendHealthUrl = () => {
+  return `${resolveBackendBaseUrl()}/health`
 }
 
 export async function requestBackendControl<T>(path: string, method: 'GET' | 'POST' = 'POST'): Promise<T> {

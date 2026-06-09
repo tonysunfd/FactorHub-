@@ -18,7 +18,8 @@ import {
   Divider,
   Tabs,
   Progress,
-  Tooltip
+  Tooltip,
+  Empty
 } from 'antd'
 import {
   ArrowLeftOutlined,
@@ -34,11 +35,64 @@ import {
 import { WarningOutlined } from '@ant-design/icons'
 import * as echarts from 'echarts'
 import { api } from '@/services/api'
+import FactorTaskDetailsPanel from './FactorTaskDetailsPanel'
+import type { FactorTaskDetails } from './FactorTaskDetailsPanel'
 import './FactorDetail.css'
 import dayjs from 'dayjs'
 
 const { Option } = Select
 const { RangePicker } = DatePicker
+
+interface FactorTaskDetailsPayload extends FactorTaskDetails {}
+
+interface FactorDetailTaskMetadata {
+  task_id?: string
+  source_expression?: string
+  source?: string
+  task_details?: FactorTaskDetailsPayload
+  quantgpt_task_details?: FactorTaskDetailsPayload // legacy compatibility
+  report_url?: string
+  report_metrics?: Record<string, any>
+  backtest_summary?: Record<string, any>
+  component_scores?: Record<string, any>
+  anti_overfit?: Record<string, any>
+  wq_brain?: Record<string, any>
+  interpretation?: Record<string, any>
+  upstream?: Record<string, any>
+}
+
+interface FactorTaskSnapshot {
+  id: number
+  factor_id: number
+  task_id?: string
+  source?: string
+  snapshot_type?: string
+  payload?: Record<string, any>
+  created_at?: string
+}
+
+const normalizeTaskDetailsForDashboard = (raw?: Record<string, any> | null): FactorTaskDetails | null => {
+  if (!raw || typeof raw !== 'object') return null
+  const reportMetrics = raw.report_metrics || raw.metrics || {}
+  return {
+    ...raw,
+    report_metrics: reportMetrics,
+    metrics: reportMetrics,
+    expression: raw.expression || raw.params?.expression || raw.llm?.generated_expression,
+    report_url: raw.report_url,
+    backtest_summary: raw.backtest_summary || {},
+    wq_brain: raw.wq_brain || {},
+    interpretation: raw.interpretation || {},
+    params: raw.params || {},
+    llm: raw.llm || {},
+  }
+}
+
+const formatMetricNumber = (value: any, digits = 2) => {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return '-'
+  return numeric.toFixed(digits)
+}
 
 interface FactorDetail {
   id: number
@@ -50,6 +104,9 @@ interface FactorDetail {
   is_active?: boolean
   created_at?: string
   updated_at?: string
+  task_metadata?: FactorDetailTaskMetadata
+  latest_task_snapshot?: FactorTaskSnapshot
+  task_snapshots?: FactorTaskSnapshot[]
 }
 
 interface AnalysisData {
@@ -85,7 +142,7 @@ const InfoTooltip: React.FC<{ title: string; content: string }> = ({ title, cont
   </Tooltip>
 )
 
-// 公式类型帮助内容（用于Tooltip）
+// 公式类型帮助内容(用于Tooltip)
 const getFormulaHelpContent = (formulaType: string) => {
   if (formulaType === 'expression') {
     return (
@@ -127,7 +184,7 @@ const getFormulaHelpContent = (formulaType: string) => {
           <p style={{ margin: 0, color: '#ccc', lineHeight: '1.6' }}>支持预定义函数和自定义def函数两种写法</p>
         </div>
         <div style={{ marginBottom: '12px', paddingBottom: '12px', borderBottom: '1px solid #444' }}>
-          <div style={{ fontWeight: 600, marginBottom: '6px', fontSize: '13px', color: '#fff' }}>方式一：预定义函数</div>
+          <div style={{ fontWeight: 600, marginBottom: '6px', fontSize: '13px', color: '#fff' }}>方式一:预定义函数</div>
           <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
             <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• <code style={{ color: '#4dabf7', background: 'rgba(255, 255, 255, 0.1)', padding: '2px 4px', borderRadius: '3px' }}>RSI(close, 14)</code> - 14日RSI</li>
             <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• <code style={{ color: '#4dabf7', background: 'rgba(255, 255, 255, 0.1)', padding: '2px 4px', borderRadius: '3px' }}>MACD(close, 12, 26, 9)[0]</code> - MACD快线</li>
@@ -139,41 +196,41 @@ const getFormulaHelpContent = (formulaType: string) => {
           </ul>
         </div>
         <div style={{ marginBottom: '12px', paddingBottom: '12px', borderBottom: '1px solid #444' }}>
-          <div style={{ fontWeight: 600, marginBottom: '6px', fontSize: '13px', color: '#fff' }}>方式二：自定义def函数</div>
-          <p style={{ margin: '0 0 8px 0', color: '#ccc', lineHeight: '1.6', fontSize: '12px' }}>使用Python def语法编写复杂逻辑（<WarningOutlined style={{ color: '#f59e0b' }} /> 函数名必须为 calculate_factor）</p>
+          <div style={{ fontWeight: 600, marginBottom: '6px', fontSize: '13px', color: '#fff' }}>方式二:自定义def函数</div>
+          <p style={{ margin: '0 0 8px 0', color: '#ccc', lineHeight: '1.6', fontSize: '12px' }}>使用Python def语法编写复杂逻辑(<WarningOutlined style={{ color: '#f59e0b' }} /> 函数名必须为 calculate_factor)</p>
           <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-            <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• <strong style={{ color: '#f59e0b' }}>函数名必须固定为：</strong><code style={{ color: '#f59e0b', background: 'rgba(245, 158, 11, 0.1)', padding: '2px 4px', borderRadius: '3px' }}>def calculate_factor(df):</code></li>
+            <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• <strong style={{ color: '#f59e0b' }}>函数名必须固定为:</strong><code style={{ color: '#f59e0b', background: 'rgba(245, 158, 11, 0.1)', padding: '2px 4px', borderRadius: '3px' }}>def calculate_factor(df):</code></li>
             <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• 参数 <code style={{ color: '#4dabf7', background: 'rgba(255, 255, 255, 0.1)', padding: '2px 4px', borderRadius: '3px' }}>df</code> 是包含 open/high/low/close/volume 的 DataFrame</li>
             <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• 必须返回 Series 或可转换为 Series 的数组</li>
             <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• 支持多行代码、条件判断、循环等复杂逻辑</li>
-            <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• <strong style={{ color: '#10b981' }}>✓ 完全兼容麦语言函数：</strong><code style={{ color: '#10b981', background: 'rgba(16, 185, 129, 0.1)', padding: '2px 4px', borderRadius: '3px' }}>REF, HHV, LLV, CROSS, IF, MA, SUM, STD</code> 等</li>
+            <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• <strong style={{ color: '#10b981' }}>✓ 完全兼容麦语言函数:</strong><code style={{ color: '#10b981', background: 'rgba(16, 185, 129, 0.1)', padding: '2px 4px', borderRadius: '3px' }}>REF, HHV, LLV, CROSS, IF, MA, SUM, STD</code> 等</li>
           </ul>
         </div>
         <div>
           <div style={{ fontWeight: 600, marginBottom: '6px', fontSize: '13px', color: '#fff' }}>def函数示例</div>
           <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
             <li style={{ padding: '4px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>
-              <div style={{ marginBottom: '4px', color: '#ccc' }}>• 条件组合因子：</div>
+              <div style={{ marginBottom: '4px', color: '#ccc' }}>• 条件组合因子:</div>
               <code style={{ display: 'block', color: '#4dabf7', background: 'rgba(0, 0, 0, 0.3)', padding: '6px 8px', borderRadius: '4px', fontSize: '11px', fontFamily: 'monospace', whiteSpace: 'pre-wrap', marginTop: '4px' }}>def calculate_factor(df):
     ma20 = df['close'].rolling(20).mean()
     ma60 = df['close'].rolling(60).mean()
     return (ma20 &gt; ma60).astype(int)</code>
             </li>
             <li style={{ padding: '4px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>
-              <div style={{ marginBottom: '4px', color: '#ccc' }}>• 使用麦语言函数：</div>
+              <div style={{ marginBottom: '4px', color: '#ccc' }}>• 使用麦语言函数:</div>
               <code style={{ display: 'block', color: '#4dabf7', background: 'rgba(0, 0, 0, 0.3)', padding: '6px 8px', borderRadius: '4px', fontSize: '11px', fontFamily: 'monospace', whiteSpace: 'pre-wrap', marginTop: '4px' }}>def calculate_factor(df):
     ma5 = MA(df['close'], 5)
     ma10 = MA(df['close'], 10)
     return CROSS(ma5, ma10).astype(int)</code>
             </li>
             <li style={{ padding: '4px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>
-              <div style={{ marginBottom: '4px', color: '#ccc' }}>• 带条件判断的因子：</div>
+              <div style={{ marginBottom: '4px', color: '#ccc' }}>• 带条件判断的因子:</div>
               <code style={{ display: 'block', color: '#4dabf7', background: 'rgba(0, 0, 0, 0.3)', padding: '6px 8px', borderRadius: '4px', fontSize: '11px', fontFamily: 'monospace', whiteSpace: 'pre-wrap', marginTop: '4px' }}>def calculate_factor(df):
     rsi = RSI(df['close'], 14)
     return np.where(rsi &gt; 70, -1, np.where(rsi &lt; 30, 1, 0))</code>
             </li>
             <li style={{ padding: '4px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>
-              <div style={{ marginBottom: '4px', color: '#ccc' }}>• 波动率加权因子：</div>
+              <div style={{ marginBottom: '4px', color: '#ccc' }}>• 波动率加权因子:</div>
               <code style={{ display: 'block', color: '#4dabf7', background: 'rgba(0, 0, 0, 0.3)', padding: '6px 8px', borderRadius: '4px', fontSize: '11px', fontFamily: 'monospace', whiteSpace: 'pre-wrap', marginTop: '4px' }}>def calculate_factor(df):
     ret = df['close'].pct_change()
     vol = ret.rolling(20).std()
@@ -198,6 +255,8 @@ const FactorDetail: React.FC = () => {
 
   // 分析相关
   const [analysisData, setAnalysisData] = useState<AnalysisData | null>(null)
+  const [analysisTaskDetails, setAnalysisTaskDetails] = useState<FactorTaskDetails | null>(null)
+  const [hasAnalyzedCurrentContext, setHasAnalyzedCurrentContext] = useState(false)
   const [analyzing, setAnalyzing] = useState(false)
 
   // 编辑相关
@@ -210,7 +269,7 @@ const FactorDetail: React.FC = () => {
   const [factorChartType, setFactorChartType] = useState<string>('line')
   const [loadingChart, setLoadingChart] = useState(false)
   const [stockCode, setStockCode] = useState<string>('000001.SZ')
-  // 用于显示的股票代码（不带后缀）
+  // 用于显示的股票代码(不带后缀)
   const [stockCodeDisplay, setStockCodeDisplay] = useState<string>(stockCode.replace(/\.(SH|SZ)$/, ''))
 
   // 同步 stockCode 和 stockCodeDisplay 的状态
@@ -227,7 +286,11 @@ const FactorDetail: React.FC = () => {
   const [attributionData, setAttributionData] = useState<any>(null)
   const [monitoringData, setMonitoringData] = useState<any>(null)
   const [loadingAnalysisTabs, setLoadingAnalysisTabs] = useState(false)
-  const [activeTabKey, setActiveTabKey] = useState<string>('chart')
+  const [selectedSnapshotId, setSelectedSnapshotId] = useState<number | undefined>(undefined)
+  const [snapshotList, setSnapshotList] = useState<FactorTaskSnapshot[]>([])
+  const [activeSnapshot, setActiveSnapshot] = useState<FactorTaskSnapshot | null>(null)
+  const initialTab = searchParams.get('tab') || 'chart'
+  const [activeTabKey, setActiveTabKey] = useState<string>(initialTab)
 
   // 图表容器引用
   const distributionChartRef = useRef<HTMLDivElement>(null)
@@ -261,6 +324,17 @@ const FactorDetail: React.FC = () => {
       const response = await api.getFactorDetail(Number(id)) as any
       if (response && response.success) {
         setFactor(response.data)
+        const snapshotsResp = await api.getFactorSnapshots(Number(id)) as any
+        const snapshots = snapshotsResp?.data || []
+        setSnapshotList(snapshots)
+        const firstId = snapshots[0]?.id
+        setSelectedSnapshotId(firstId)
+        if (firstId) {
+          const snapshotResp = await api.getFactorSnapshot(Number(id), firstId) as any
+          setActiveSnapshot(snapshotResp?.data || null)
+        } else {
+          setActiveSnapshot(null)
+        }
       } else {
         message.error('因子不存在')
       }
@@ -293,6 +367,7 @@ const FactorDetail: React.FC = () => {
     }
 
     setAnalyzing(true)
+    setHasAnalyzedCurrentContext(false)
     try {
       const response = await api.calculateIC({
         factor_name: factor.name,
@@ -331,11 +406,31 @@ const FactorDetail: React.FC = () => {
             }
           }
         })
+
+        try {
+          const recomputeResp = await api.recomputeTaskDetails({
+            factor_name: factor.name,
+            stock_codes: [stockCode],
+            start_date: startDate,
+            end_date: endDate
+          } as any) as any
+
+          if (recomputeResp?.success && recomputeResp?.data) {
+            setAnalysisTaskDetails(normalizeTaskDetailsForDashboard(recomputeResp.data))
+          } else {
+            setAnalysisTaskDetails(null)
+          }
+        } catch (recomputeError) {
+          console.error('重算 task details 失败:', recomputeError)
+          setAnalysisTaskDetails(null)
+        }
+
+        setHasAnalyzedCurrentContext(true)
         message.success('因子分析完成')
         // 同时加载 Tab 2-5 的数据
         loadAnalysisTabsData()
       } else {
-        message.error('因子分析失败：' + (response.message || '未知错误'))
+        message.error('因子分析失败:' + (response.message || '未知错误'))
       }
     } catch (error: any) {
       console.error('因子分析失败:', error)
@@ -426,7 +521,7 @@ const FactorDetail: React.FC = () => {
 
     Modal.confirm({
       title: '确认删除',
-      content: `确定要删除因子 "${factor.name}" 吗？`,
+      content: `确定要删除因子 "${factor.name}" 吗?`,
       onOk: async () => {
         try {
           const response = await api.deleteFactor(factor.id) as any
@@ -451,7 +546,7 @@ const FactorDetail: React.FC = () => {
       const response = await api.copyFactor(factor.id) as any
       if (response.success) {
         message.success(`因子已复制为 "${response.data.name}"`)
-        // 可选：跳转到新复制的因子详情页
+        // 可选:跳转到新复制的因子详情页
         // navigate(`/factor-detail?id=${response.data.id}`)
       } else {
         message.error(response.message || '复制失败')
@@ -467,6 +562,49 @@ const FactorDetail: React.FC = () => {
     return dayjs(dateStr).format('YYYY-MM-DD HH:mm:ss')
   }
 
+  const taskDetails = factor?.task_metadata || {}
+  const taskSnapshots = snapshotList.length ? snapshotList : (factor?.task_snapshots || [])
+  const latestTaskSnapshot = factor?.latest_task_snapshot || null
+  const activeTaskSnapshot = activeSnapshot || taskSnapshots.find(snapshot => snapshot.id === selectedSnapshotId) || latestTaskSnapshot || null
+  const currentTaskDetails = normalizeTaskDetailsForDashboard(((activeTaskSnapshot?.payload as FactorTaskDetailsPayload | undefined) || taskDetails.task_details || taskDetails.quantgpt_task_details || null) as Record<string, any> | null)
+  const displayTaskId = activeTaskSnapshot?.task_id || taskDetails.task_id
+  const displayTaskSource = activeTaskSnapshot?.source || taskDetails.source
+  const analysisDisplayTaskDetails = analysisTaskDetails || null
+
+  const icStatsMap = analysisData?.ic?.data?.ic_stats || {}
+  const icFactorName = factor?.name && icStatsMap[factor.name] ? factor.name : Object.keys(icStatsMap)[0]
+  const currentIcStats = icFactorName ? icStatsMap[icFactorName] || {} : {}
+  const analysisKeyMetricsSummary = [
+    { label: '当前因子值', value: formatMetricNumber(exposureData?.current_value, 4) },
+    { label: '历史分位数', value: exposureData?.percentile !== undefined ? `${formatMetricNumber(exposureData?.percentile, 1)}%` : '-' },
+    { label: '滚动标准差', value: formatMetricNumber(exposureData?.latest_std, 4) },
+    { label: '变异系数', value: formatMetricNumber(exposureData?.cv, 4) },
+    { label: 'IC Mean', value: formatMetricNumber(effectivenessData?.ic_time_series?.ic_mean, 4) },
+    { label: 'IC Std', value: formatMetricNumber(effectivenessData?.ic_time_series?.ic_std, 4) },
+    { label: 'IR', value: formatMetricNumber(effectivenessData?.ic_time_series?.ir, 2) },
+    { label: 'IC正值占比', value: effectivenessData?.ic_time_series?.ic_positive_ratio !== undefined ? `${formatMetricNumber(effectivenessData?.ic_time_series?.ic_positive_ratio, 2)}%` : '-' },
+    { label: 'Rank IC', value: formatMetricNumber(currentIcStats['RankIC均值'] ?? currentIcStats['Rank IC均值'] ?? currentIcStats.rank_ic_mean, 4) },
+    { label: 'IC IR', value: formatMetricNumber(currentIcStats['IR比率'] ?? currentIcStats.ic_ir, 2) },
+    { label: 'Alpha', value: formatMetricNumber(attributionData?.alpha_beta?.alpha, 4) },
+    { label: '多空收益', value: formatMetricNumber(attributionData?.factor_contribution?.long_short_return, 4) },
+  ]
+  const analysisWQBrainSummary = [
+    { label: 'WQ Sharpe', value: formatMetricNumber(effectivenessData?.ic_time_series?.ir, 2) },
+    { label: 'WQ Fitness', value: formatMetricNumber(currentIcStats['IR比率'] ?? currentIcStats.ic_ir, 3) },
+    { label: 'WQ Returns', value: attributionData?.factor_contribution?.long_short_return !== undefined ? `${formatMetricNumber(attributionData?.factor_contribution?.long_short_return, 2)}%` : '-' },
+    { label: 'WQ Rating', value: (effectivenessData?.ic_time_series?.ir ?? 0) > 0.5 ? 'B' : (effectivenessData?.ic_time_series?.ir ?? 0) > 0 ? 'C' : 'D' },
+  ]
+  const analysisReportSummary = [
+    { label: 'Sharpe', value: formatMetricNumber(attributionData?.return_decomposition?.overall_stats?.sharpe_ratio, 2) },
+    { label: 'CAGR', value: attributionData?.return_decomposition?.overall_stats?.annual_return !== undefined ? `${formatMetricNumber(attributionData?.return_decomposition?.overall_stats?.annual_return, 2)}%` : '-' },
+    { label: 'Max Drawdown', value: attributionData?.alpha_beta?.portfolio_return?.max_drawdown !== undefined ? `${formatMetricNumber(attributionData?.alpha_beta?.portfolio_return?.max_drawdown, 2)}%` : '-' },
+    { label: 'Volatility', value: attributionData?.return_decomposition?.overall_stats?.volatility_annual !== undefined ? `${formatMetricNumber(attributionData?.return_decomposition?.overall_stats?.volatility_annual, 2)}%` : '-' },
+  ]
+  const hasAnalysisKeyMetrics = analysisKeyMetricsSummary.some(item => item.value !== '-')
+  const hasAnalysisWQSummary = analysisWQBrainSummary.some(item => item.value !== '-')
+  const hasAnalysisReportSummary = analysisReportSummary.some(item => item.value !== '-')
+  const hasAnalysisSummary = hasAnalysisKeyMetrics || hasAnalysisWQSummary || hasAnalysisReportSummary
+  const shouldShowAnalysisSummary = hasAnalyzedCurrentContext && (Boolean(analysisDisplayTaskDetails) || hasAnalysisSummary)
   // 图表初始化函数
   const initChart = (chartDom: HTMLDivElement | null, chartKey: string) => {
     if (!chartDom) return null
@@ -476,7 +614,7 @@ const FactorDetail: React.FC = () => {
       return null
     }
 
-    // 如果图表实例已存在，直接返回
+    // 如果图表实例已存在,直接返回
     if (chartsRef.current[chartKey]) {
       return chartsRef.current[chartKey]
     }
@@ -1065,7 +1203,7 @@ const FactorDetail: React.FC = () => {
 
     const option: echarts.EChartsOption = {
       title: {
-        text: '事件响应分析（高/低暴露后收益）',
+        text: '事件响应分析(高/低暴露后收益)',
         left: 'center',
         textStyle: { fontSize: 16, fontWeight: 600 }
       },
@@ -1149,7 +1287,7 @@ const FactorDetail: React.FC = () => {
 
     const option: echarts.EChartsOption = {
       title: {
-        text: '因子衰减曲线（IC vs 持有期）',
+        text: '因子衰减曲线(IC vs 持有期)',
         left: 'center',
         textStyle: { fontSize: 16, fontWeight: 600 }
       },
@@ -1227,9 +1365,9 @@ const FactorDetail: React.FC = () => {
     const upperBand = data.upper_band || []
     const lowerBand = data.lower_band || []
 
-    // 构建置信区间区域数据（使用多边形）
+    // 构建置信区间区域数据(使用多边形)
     const areaData: (number | string)[][] = []
-    // 从左到右：上界线（从右到左）+ 下界线（从左到右）
+    // 从左到右:上界线(从右到左)+ 下界线(从左到右)
     for (let i = dates.length - 1; i >= 0; i--) {
       if (upperBand[i] !== undefined && upperBand[i] !== null) {
         areaData.push([dates[i], upperBand[i]])
@@ -1291,7 +1429,7 @@ const FactorDetail: React.FC = () => {
       yAxis: {
         type: 'value',
         name: '因子值',
-        scale: true  // 自适应高度，不从0开始
+        scale: true  // 自适应高度,不从0开始
       },
       dataZoom: [
         { type: 'inside', start: 0, end: 100 }
@@ -1483,7 +1621,7 @@ const FactorDetail: React.FC = () => {
       yAxis: {
         type: 'value',
         name: '因子值',
-        scale: true  // 自适应高度，不从0开始
+        scale: true  // 自适应高度,不从0开始
       },
       dataZoom: [
         { type: 'inside', start: 0, end: 100 }
@@ -1518,15 +1656,14 @@ const FactorDetail: React.FC = () => {
     const frequencies = data.frequencies || []
     const powers = data.powers || []
 
-    // 只显示前半部分的频率（正频率）
+    // 只显示前半部分的频率(正频率)
     const halfLen = Math.ceil(frequencies.length / 2)
     const displayFreqs = frequencies.slice(0, halfLen)
     const displayPowers = powers.slice(0, halfLen)
 
-    // 转换频率为周期（天数）
     const option: echarts.EChartsOption = {
       title: {
-        text: '功率谱（频域分析）',
+        text: '功率谱(频域分析)',
         left: 'center',
         textStyle: { fontSize: 14, fontWeight: 600 }
       },
@@ -1730,7 +1867,7 @@ const FactorDetail: React.FC = () => {
     }
   }, [factor, chartPeriod, stockCode, customStartDate, customEndDate])
 
-  // 加载所有分析 Tab 数据（Tab 2-5）
+  // 加载所有分析 Tab 数据(Tab 2-5)
   const loadAnalysisTabsData = useCallback(async () => {
     if (!factor) return
 
@@ -1813,7 +1950,7 @@ const FactorDetail: React.FC = () => {
     const myChart = initChart(chartDom, 'price')
     if (!myChart || !chartData) return
 
-    // 清除之前的图表配置，防止图表类型切换时出现异常
+    // 清除之前的图表配置,防止图表类型切换时出现异常
     myChart.clear()
 
     const { stock, factor } = chartData
@@ -1946,7 +2083,7 @@ const FactorDetail: React.FC = () => {
 
     // 单轴归一化模式
     if (factorChartType === 'normalized') {
-      // 归一化处理：首日为100，计算百分比变化
+      // 归一化处理:首日为100,计算百分比变化
       const basePrice = displayStock[0]?.close || 1
       const baseFactor = displayFactorValues[0] || 1
 
@@ -2062,7 +2199,7 @@ const FactorDetail: React.FC = () => {
       return
     }
 
-    // 分屏模式（折线图、柱状图、面积图）
+    // 分屏模式(折线图、柱状图、面积图)
     const option: echarts.EChartsOption = {
       animation: false,
       axisPointer: {
@@ -2211,23 +2348,27 @@ const FactorDetail: React.FC = () => {
     loadFactorDetail()
   }, [loadFactorDetail])
 
-  // 页面加载完成后滚动到顶部，并自动加载行情图表
+  useEffect(() => {
+    const tab = searchParams.get('tab') || 'chart'
+    setActiveTabKey(tab)
+  }, [searchParams])
+
+  // 页面加载完成后滚动到顶部
   useEffect(() => {
     if (factor) {
       window.scrollTo({ top: 0, behavior: 'smooth' })
-      // 清理旧的行情图表实例，确保因子变化时重新创建干净的图表
       if (chartsRef.current['price']) {
         chartsRef.current['price'].dispose()
         delete chartsRef.current['price']
       }
-      // 清空旧的图表数据
       setChartData(null)
-      // 延迟加载新的图表数据
-      setTimeout(() => {
-        loadChartData()
-      }, 50)
     }
-  }, [factor, loadChartData])
+  }, [factor])
+
+  useEffect(() => {
+    setHasAnalyzedCurrentContext(false)
+    setAnalysisTaskDetails(null)
+  }, [factor?.id, stockCode, chartPeriod, customStartDate, customEndDate])
 
   // 图表绘制
   useEffect(() => {
@@ -2240,12 +2381,12 @@ const FactorDetail: React.FC = () => {
     }
   }, [analysisData, drawDistributionChart, drawICSeriesChart, drawICHistogramChart])
 
-  // 监控effectivenessData变化（调试用）
+  // 监控effectivenessData变化(调试用)
   useEffect(() => {
     console.log('effectivenessData changed:', effectivenessData)
   }, [effectivenessData])
 
-  // 分析 Tab 图表绘制（Tab 2-5）
+  // 分析 Tab 图表绘制(Tab 2-5)
   useEffect(() => {
     if (exposureData) {
       setTimeout(() => {
@@ -2271,7 +2412,7 @@ const FactorDetail: React.FC = () => {
     }
   }, [exposureData, effectivenessData, monitoringData, drawExposureHistogram, drawPercentileTimeSeries, drawScatterChart, drawICTimeSeriesChart, drawEventResponseChart, drawDecayCurveChart, drawRollingBandChart, drawTransitionMatrix, drawStructuralBreakChart, drawSeasonalityChart])
 
-  // Tab 切换时重新绘制图表（确保图表容器已渲染）
+  // Tab 切换时重新绘制图表(确保图表容器已渲染)
   useEffect(() => {
     const redrawTimer = setTimeout(() => {
       if (activeTabKey === 'exposure' && exposureData) {
@@ -2286,7 +2427,7 @@ const FactorDetail: React.FC = () => {
           drawDecayCurveChart()
         }, 100)
       } else if (activeTabKey === 'attribution' && attributionData) {
-        // Tab 4 是纯数据展示，不需要重绘图表
+        // Tab 4 是纯数据展示,不需要重绘图表
       } else if (activeTabKey === 'monitoring' && monitoringData) {
         drawRollingBandChart()
         drawTransitionMatrix()
@@ -2503,8 +2644,8 @@ const FactorDetail: React.FC = () => {
                 </Row>
               </Card>
 
-              {/* 分析Tab页 */}
               <Card className="analysis-tabs-card" variant="borderless" style={{ marginTop: '16px' }}>
+                {/* 分析Tab页 */}
                 <Tabs
                   activeKey={activeTabKey}
                   onChange={setActiveTabKey}
@@ -2543,6 +2684,98 @@ const FactorDetail: React.FC = () => {
                       )
                     },
                     {
+                      key: 'key-metrics',
+                      label: 'Key Metrics',
+                      children: shouldShowAnalysisSummary && analysisDisplayTaskDetails ? (
+                        <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                          <Card className="detail-card" variant="borderless">
+                            <div className="task-summary-tab-header">
+                              <div>
+                                <div className="task-summary-tab-title">Key Metrics</div>
+                                <div className="task-summary-tab-subtitle">基于当前股票代码与时间区间重新计算，并保持 Task Details 展示格式。</div>
+                              </div>
+                              <Tag color="blue">{stockCode}</Tag>
+                            </div>
+                          </Card>
+                          <FactorTaskDetailsPanel
+                            taskId={`analysis:${factor?.name || 'factor'}`}
+                            source="recomputed-analysis"
+                            details={analysisDisplayTaskDetails}
+                          />
+                        </Space>
+                      ) : shouldShowAnalysisSummary && hasAnalysisSummary ? (
+                        <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                          {hasAnalysisKeyMetrics ? (
+                            <Card className="detail-card" variant="borderless">
+                              <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                                <div className="task-summary-tab-header">
+                                  <div>
+                                    <div className="task-summary-tab-title">Key Metrics</div>
+                                    <div className="task-summary-tab-subtitle">基于当前股票代码与时间区间重新计算的核心指标。</div>
+                                  </div>
+                                  <Tag color="blue">{stockCode}</Tag>
+                                </div>
+                                <div className="task-summary-mini-grid">
+                                  {analysisKeyMetricsSummary.map((item) => (
+                                    <div key={item.label} className="task-summary-mini-item">
+                                      <div className="task-summary-mini-label">{item.label}</div>
+                                      <div className="task-summary-mini-value">{item.value}</div>
+                                    </div>
+                                  ))}
+                                </div>
+                              </Space>
+                            </Card>
+                          ) : null}
+
+                          {hasAnalysisWQSummary ? (
+                            <Card className="detail-card" variant="borderless">
+                              <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                                <div className="task-summary-tab-header">
+                                  <div>
+                                    <div className="task-summary-tab-title">WQ Brain</div>
+                                    <div className="task-summary-tab-subtitle">基于当前分析结果重新计算的 WQ Brain 结果。</div>
+                                  </div>
+                                </div>
+                                <div className="task-summary-mini-grid">
+                                  {analysisWQBrainSummary.map((item) => (
+                                    <div key={item.label} className="task-summary-mini-item">
+                                      <div className="task-summary-mini-label">{item.label}</div>
+                                      <div className="task-summary-mini-value">{item.value}</div>
+                                    </div>
+                                  ))}
+                                </div>
+                              </Space>
+                            </Card>
+                          ) : null}
+
+                          {hasAnalysisReportSummary ? (
+                            <Card className="detail-card" variant="borderless">
+                              <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                                <div className="task-summary-tab-header">
+                                  <div>
+                                    <div className="task-summary-tab-title">Report</div>
+                                    <div className="task-summary-tab-subtitle">基于当前股票代码与时间区间重新生成的 Report。</div>
+                                  </div>
+                                </div>
+                                <div className="task-summary-mini-grid">
+                                  {analysisReportSummary.map((item) => (
+                                    <div key={item.label} className="task-summary-mini-item">
+                                      <div className="task-summary-mini-label">{item.label}</div>
+                                      <div className="task-summary-mini-value">{item.value}</div>
+                                    </div>
+                                  ))}
+                                </div>
+                              </Space>
+                            </Card>
+                          ) : null}
+                        </Space>
+                      ) : (
+                        <Card className="empty-card" variant="borderless">
+                          <Empty description={analyzing || loadingAnalysisTabs ? '分析中...' : '请先点击“分析因子”生成 Key Metrics'} />
+                        </Card>
+                      )
+                    },
+                    {
                       key: 'exposure',
                       label: '因子暴露度',
                       children: (
@@ -2562,7 +2795,7 @@ const FactorDetail: React.FC = () => {
                                       title={
                                         <InfoTooltip
                                           title="当前因子值"
-                                          content="最新一天计算的因子值，反映了当前时点的因子暴露水平。用于判断当前因子处于高值还是低值状态。"
+                                          content="最新一天计算的因子值,反映了当前时点的因子暴露水平。用于判断当前因子处于高值还是低值状态。"
                                         />
                                       }
                                       value={exposureData.current_value ?? '-'}
@@ -2575,7 +2808,7 @@ const FactorDetail: React.FC = () => {
                                       title={
                                         <InfoTooltip
                                           title="分位数"
-                                          content="当前因子值在历史分布中的百分位。例如：80%表示当前值高于历史上80%的时间。用于判断因子暴露相对历史的高低水平。"
+                                          content="当前因子值在历史分布中的百分位。例如:80%表示当前值高于历史上80%的时间。用于判断因子暴露相对历史的高低水平。"
                                         />
                                       }
                                       value={exposureData.percentile ?? '-'}
@@ -2595,7 +2828,7 @@ const FactorDetail: React.FC = () => {
                                       title={
                                         <InfoTooltip
                                           title="滚动标准差"
-                                          content="过去20个交易日的因子值标准差，反映因子的波动性。标准差越大说明因子值波动越剧烈，稳定性越差。"
+                                          content="过去20个交易日的因子值标准差,反映因子的波动性。标准差越大说明因子值波动越剧烈,稳定性越差。"
                                         />
                                       }
                                       value={exposureData.latest_std ?? '-'}
@@ -2607,7 +2840,7 @@ const FactorDetail: React.FC = () => {
                                       title={
                                         <InfoTooltip
                                           title="变异系数"
-                                          content="标准差与均值的比值（无量纲），用于比较不同波动水平。CV越大说明相对波动越大。一般CV<0.3为低波动，0.3-0.7为中等，>0.7为高波动。"
+                                          content="标准差与均值的比值(无量纲),用于比较不同波动水平。CV越大说明相对波动越大。一般CV<0.3为低波动,0.3-0.7为中等,>0.7为高波动。"
                                         />
                                       }
                                       value={exposureData.cv ?? '-'}
@@ -2622,14 +2855,14 @@ const FactorDetail: React.FC = () => {
                                 title={
                                   <InfoTooltip
                                     title="因子暴露度分位数"
-                                    content="显示当前因子值在历史分布中的位置，用于判断因子暴露相对水平。分位数越低表示因子值越低（低暴露），越高表示因子值越高（高暴露）。"
+                                    content="显示当前因子值在历史分布中的位置,用于判断因子暴露相对水平。分位数越低表示因子值越低(低暴露),越高表示因子值越高(高暴露)。"
                                   />
                                 }
                                 variant="borderless"
                                 style={{ marginBottom: '16px' }}
                               >
                                 <div style={{ marginBottom: '8px' }}>
-                                  <span style={{ fontWeight: 500 }}>当前分位数：</span>
+                                  <span style={{ fontWeight: 500 }}>当前分位数:</span>
                                   <span style={{ marginLeft: '8px', color: '#64748b' }}>
                                     {exposureData.percentile?.toFixed(1)}%
                                   </span>
@@ -2658,7 +2891,7 @@ const FactorDetail: React.FC = () => {
                                 title={
                                   <InfoTooltip
                                     title="分位数变化曲线"
-                                    content="展示因子值分位数随时间的变化趋势，可以观察因子暴露的周期性和趋势性。适用于判断因子是否处于周期性波动，以及识别极端暴露时期。"
+                                    content="展示因子值分位数随时间的变化趋势,可以观察因子暴露的周期性和趋势性。适用于判断因子是否处于周期性波动,以及识别极端暴露时期。"
                                   />
                                 }
                                 variant="borderless"
@@ -2672,7 +2905,7 @@ const FactorDetail: React.FC = () => {
                                 title={
                                   <InfoTooltip
                                     title="历史分布直方图"
-                                    content="展示因子值的历史频率分布，帮助判断因子是否符合正态分布、是否存在肥尾效应。用于识别极端值和评估因子的统计特性。"
+                                    content="展示因子值的历史频率分布,帮助判断因子是否符合正态分布、是否存在肥尾效应。用于识别极端值和评估因子的统计特性。"
                                   />
                                 }
                                 variant="borderless"
@@ -2704,7 +2937,7 @@ const FactorDetail: React.FC = () => {
                                       title={
                                         <InfoTooltip
                                           title="IC均值"
-                                          content="Information Coefficient均值，衡量因子值与未来收益的相关性。IC>0表示因子值越高收益越高，IC<0则相反。绝对值>0.03为有效，>0.05为优秀。"
+                                          content="Information Coefficient均值,衡量因子值与未来收益的相关性。IC>0表示因子值越高收益越高,IC<0则相反。绝对值>0.03为有效,>0.05为优秀。"
                                         />
                                       }
                                       value={effectivenessData.ic_time_series?.ic_mean ?? '-'}
@@ -2723,7 +2956,7 @@ const FactorDetail: React.FC = () => {
                                       title={
                                         <InfoTooltip
                                           title="IC标准差"
-                                          content="IC的波动性度量，标准差越小IC越稳定。稳定性是因子有效性的重要指标，低标准差意味着因子在不同时期表现一致。"
+                                          content="IC的波动性度量,标准差越小IC越稳定。稳定性是因子有效性的重要指标,低标准差意味着因子在不同时期表现一致。"
                                         />
                                       }
                                       value={effectivenessData.ic_time_series?.ic_std ?? '-'}
@@ -2735,7 +2968,7 @@ const FactorDetail: React.FC = () => {
                                       title={
                                         <InfoTooltip
                                           title="IR比率"
-                                          content="Information Ratio = IC均值/IC标准差，综合衡量因子有效性和稳定性。IR>0.5为良好，>1.0为优秀。IR越高说明因子既有效又稳定。"
+                                          content="Information Ratio = IC均值/IC标准差,综合衡量因子有效性和稳定性。IR>0.5为良好,>1.0为优秀。IR越高说明因子既有效又稳定。"
                                         />
                                       }
                                       value={effectivenessData.ic_time_series?.ir ?? '-'}
@@ -2748,7 +2981,7 @@ const FactorDetail: React.FC = () => {
                                       title={
                                         <InfoTooltip
                                           title="IC>0比例"
-                                          content="IC为正的天数占比，衡量因子胜率。>50%说明因子多数时期有效，>60%为优秀。高胜率意味着因子可靠性更强。"
+                                          content="IC为正的天数占比,衡量因子胜率。>50%说明因子多数时期有效,>60%为优秀。高胜率意味着因子可靠性更强。"
                                         />
                                       }
                                       value={effectivenessData.ic_time_series?.ic_positive_ratio ?? '-'}
@@ -2766,7 +2999,7 @@ const FactorDetail: React.FC = () => {
                                     title={
                                       <InfoTooltip
                                         title="因子-收益散点图"
-                                        content="横轴为因子值，纵轴为未来收益，散点分布反映因子与收益的相关性。若呈现明显向上（下）趋势，说明正（负）相关。点的分布越集中说明相关性越稳定。用于直观判断因子有效性。"
+                                        content="横轴为因子值,纵轴为未来收益,散点分布反映因子与收益的相关性。若呈现明显向上(下)趋势,说明正(负)相关。点的分布越集中说明相关性越稳定。用于直观判断因子有效性。"
                                       />
                                     }
                                     variant="borderless"
@@ -2785,7 +3018,7 @@ const FactorDetail: React.FC = () => {
                                     title={
                                       <InfoTooltip
                                         title="IC时序分析"
-                                        content="展示每日IC值的时间序列，包含IC曲线、零线和±1标准差带。用于识别因子在不同时期的有效性变化，识别失效时期。IC持续在零线以上说明因子稳定有效。"
+                                        content="展示每日IC值的时间序列,包含IC曲线、零线和±1标准差带。用于识别因子在不同时期的有效性变化,识别失效时期。IC持续在零线以上说明因子稳定有效。"
                                       />
                                     }
                                     variant="borderless"
@@ -2803,8 +3036,8 @@ const FactorDetail: React.FC = () => {
                                   <Card
                                     title={
                                       <InfoTooltip
-                                        title="事件响应分析（高/低暴露后收益）"
-                                        content="当因子值突破高/低阈值后N天的累计收益分布。用于识别因子极端暴露的预测能力，红色（高暴露）高于绿色（低暴露）说明因子能够预测未来收益。"
+                                        title="事件响应分析(高/低暴露后收益)"
+                                        content="当因子值突破高/低阈值后N天的累计收益分布。用于识别因子极端暴露的预测能力,红色(高暴露)高于绿色(低暴露)说明因子能够预测未来收益。"
                                       />
                                     }
                                     variant="borderless"
@@ -2822,8 +3055,8 @@ const FactorDetail: React.FC = () => {
                                   <Card
                                     title={
                                       <InfoTooltip
-                                        title="因子衰减曲线（IC vs 持有期）"
-                                        content="展示因子预测能力随持有期延长而衰减的曲线。IC随持有期下降越快，说明因子信息越短暂。用于确定最佳持有周期，通常选择IC衰减前的持仓周期。"
+                                        title="因子衰减曲线(IC vs 持有期)"
+                                        content="展示因子预测能力随持有期延长而衰减的曲线。IC随持有期下降越快,说明因子信息越短暂。用于确定最佳持有周期,通常选择IC衰减前的持仓周期。"
                                       />
                                     }
                                     variant="borderless"
@@ -2861,7 +3094,7 @@ const FactorDetail: React.FC = () => {
                                   title={
                                     <InfoTooltip
                                       title="Alpha-Beta 分析"
-                                      content="将收益分解为Alpha（超额收益）和Beta（市场风险暴露）。Alpha衡量因子的选股能力，Beta衡量对市场的敏感度。高Alpha说明因子能够获得超额收益，R²>0.7说明拟合良好。"
+                                      content="将收益分解为Alpha(超额收益)和Beta(市场风险暴露)。Alpha衡量因子的选股能力,Beta衡量对市场的敏感度。高Alpha说明因子能够获得超额收益,R2>0.7说明拟合良好。"
                                     />
                                   }
                                   variant="borderless"
@@ -2882,7 +3115,7 @@ const FactorDetail: React.FC = () => {
                                               title={
                                                 <InfoTooltip
                                                   title="年化收益"
-                                                  content="投资组合的年化收益率，衡量投资回报水平。正值表示盈利，负值表示亏损。年化收益>10%为良好，>20%为优秀。"
+                                                  content="投资组合的年化收益率,衡量投资回报水平。正值表示盈利,负值表示亏损。年化收益>10%为良好,>20%为优秀。"
                                                 />
                                               }
                                               value={attributionData.alpha_beta.portfolio_return.annual_return ?? '-'}
@@ -2900,7 +3133,7 @@ const FactorDetail: React.FC = () => {
                                               title={
                                                 <InfoTooltip
                                                   title="年化波动率"
-                                                  content="收益的标准差，衡量投资风险。波动率越大风险越高。一般<15%为低风险，15-30%为中等，>30%为高风险。"
+                                                  content="收益的标准差,衡量投资风险。波动率越大风险越高。一般<15%为低风险,15-30%为中等,>30%为高风险。"
                                                 />
                                               }
                                               value={attributionData.alpha_beta.portfolio_return.volatility ?? '-'}
@@ -2913,7 +3146,7 @@ const FactorDetail: React.FC = () => {
                                               title={
                                                 <InfoTooltip
                                                   title="夏普比率"
-                                                  content="风险调整后收益指标 = (收益-无风险利率)/波动率。夏普>1为良好，>2为优秀。数值越高说明单位风险的收益越高。"
+                                                  content="风险调整后收益指标 = (收益-无风险利率)/波动率。夏普>1为良好,>2为优秀。数值越高说明单位风险的收益越高。"
                                                 />
                                               }
                                               value={attributionData.alpha_beta.portfolio_return.sharpe ?? '-'}
@@ -2925,7 +3158,7 @@ const FactorDetail: React.FC = () => {
                                               title={
                                                 <InfoTooltip
                                                   title="日均收益"
-                                                  content="每日平均收益率，反映日常盈利水平。用于评估短期收益能力。"
+                                                  content="每日平均收益率,反映日常盈利水平。用于评估短期收益能力。"
                                                 />
                                               }
                                               value={attributionData.alpha_beta.portfolio_return.daily_mean ?? '-'}
@@ -2943,7 +3176,7 @@ const FactorDetail: React.FC = () => {
                                             title={
                                               <InfoTooltip
                                                 title="年化 Alpha"
-                                                content="超额收益，衡量因子超越市场的能力。Alpha>0说明因子能获得超额收益，>5%为优秀，<0说明跑输市场。"
+                                                content="超额收益,衡量因子超越市场的能力。Alpha>0说明因子能获得超额收益,>5%为优秀,<0说明跑输市场。"
                                               />
                                             }
                                             value={attributionData.alpha_beta?.alpha ?? '-'}
@@ -2961,7 +3194,7 @@ const FactorDetail: React.FC = () => {
                                             title={
                                               <InfoTooltip
                                                 title="Beta"
-                                                content="市场风险暴露，衡量因子对市场的敏感度。Beta=1表示与市场同步，>1表示高弹性（涨跌幅大于市场），<1表示低弹性。"
+                                                content="市场风险暴露,衡量因子对市场的敏感度。Beta=1表示与市场同步,>1表示高弹性(涨跌幅大于市场),<1表示低弹性。"
                                               />
                                             }
                                             value={attributionData.alpha_beta?.beta ?? '-'}
@@ -2972,8 +3205,8 @@ const FactorDetail: React.FC = () => {
                                           <Statistic
                                             title={
                                               <InfoTooltip
-                                                title="拟合度 (R²)"
-                                                content="模型解释力，0-1之间，越接近1说明市场风险对收益解释越强。R²>0.7为良好拟合，>0.9为优秀拟合。"
+                                                title="拟合度 (R2)"
+                                                content="模型解释力,0-1之间,越接近1说明市场风险对收益解释越强。R2>0.7为良好拟合,>0.9为优秀拟合。"
                                               />
                                             }
                                             value={attributionData.alpha_beta?.r_squared ?? '-'}
@@ -2985,7 +3218,7 @@ const FactorDetail: React.FC = () => {
                                             title={
                                               <InfoTooltip
                                                 title="日均 Alpha"
-                                                content="每日平均超额收益，反映日常超越市场的能力。用于评估短期超额收益稳定性。"
+                                                content="每日平均超额收益,反映日常超越市场的能力。用于评估短期超额收益稳定性。"
                                               />
                                             }
                                             value={attributionData.alpha_beta?.daily_alpha ?? '-'}
@@ -3009,7 +3242,7 @@ const FactorDetail: React.FC = () => {
                                   title={
                                     <InfoTooltip
                                       title="收益分解"
-                                      content="将总收益分解为因子收益和残差收益，展示因子的贡献度。因子收益越高说明因子对总收益贡献越大，残差收益是未被因子解释的部分。"
+                                      content="将总收益分解为因子收益和残差收益,展示因子的贡献度。因子收益越高说明因子对总收益贡献越大,残差收益是未被因子解释的部分。"
                                     />
                                   }
                                   variant="borderless"
@@ -3223,7 +3456,7 @@ const FactorDetail: React.FC = () => {
                                   )}
                                 </Card>
                               </Col>
-
+ 
                               {/* 暴露度转移矩阵 */}
                               <Col xs={24} lg={24}>
                                 <Card
@@ -3244,7 +3477,7 @@ const FactorDetail: React.FC = () => {
                                   )}
                                 </Card>
                               </Col>
-
+ 
                               {/* 结构断点检测 */}
                               <Col xs={24} lg={24}>
                                 <Card
@@ -3278,7 +3511,7 @@ const FactorDetail: React.FC = () => {
                                   )}
                                 </Card>
                               </Col>
-
+ 
                               {/* 周期性分析 */}
                               <Col xs={24} lg={24}>
                                 <Card
@@ -3319,6 +3552,47 @@ const FactorDetail: React.FC = () => {
                           )}
                         </>
                       )
+                    },
+                    {
+                      key: 'task-details',
+                      label: 'Task Details',
+                      children: (
+                        <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                          {taskSnapshots.length ? (
+                            <Card className="detail-card" variant="borderless">
+                              <Row gutter={[16, 16]} align="middle">
+                                <Col xs={24} md={12}>
+                                  <Select
+                                    value={selectedSnapshotId}
+                                    onChange={async (value) => {
+                                      setSelectedSnapshotId(value)
+                                      if (!id) return
+                                      try {
+                                        const snapshotResp = await api.getFactorSnapshot(Number(id), value) as any
+                                        setActiveSnapshot(snapshotResp?.data || null)
+                                      } catch {
+                                        message.error('加载研究快照失败')
+                                      }
+                                    }}
+                                    style={{ width: '100%' }}
+                                    options={taskSnapshots.map((snapshot) => ({
+                                      value: snapshot.id,
+                                      label: `${snapshot.id} · ${snapshot.source || '-'} · ${snapshot.created_at ? dayjs(snapshot.created_at).format('MM-DD HH:mm:ss') : '-'}`,
+                                    }))}
+                                  />
+                                </Col>
+                                <Col xs={24} md={12} />
+                              </Row>
+                            </Card>
+                          ) : null}
+
+                          <FactorTaskDetailsPanel
+                            taskId={displayTaskId}
+                            source={displayTaskSource}
+                            details={currentTaskDetails}
+                          />
+                        </Space>
+                      )
                     }
                   ]}
                 />
@@ -3346,7 +3620,7 @@ const FactorDetail: React.FC = () => {
             <Input
               value={editForm.name}
               onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
-              placeholder="例如：RSI指标"
+              placeholder="例如:RSI指标"
             />
           </Form.Item>
 
@@ -3408,7 +3682,7 @@ const FactorDetail: React.FC = () => {
             <Input.TextArea
               value={editForm.code}
               onChange={(e) => setEditForm({ ...editForm, code: e.target.value })}
-              placeholder={editForm.formula_type === 'expression' ? '例如：close.rolling(20).mean()' : '例如：def calculate_factor(df):\n    return df["close"].rolling(20).mean()'}
+              placeholder={editForm.formula_type === 'expression' ? '例如:close.rolling(20).mean()' : '例如:def calculate_factor(df):\n    return df["close"].rolling(20).mean()'}
               rows={6}
               className="font-mono"
               style={{

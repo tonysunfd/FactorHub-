@@ -46,7 +46,7 @@ class FactorSelectionService:
             return False
         if target_universe:
             return False
-        if origin_type == "auto_mining":
+        if origin_type in {"auto_mining", "rdagent_mining"}:
             return False
         if scope_type not in {"", "stock", "base"}:
             return False
@@ -135,8 +135,9 @@ class FactorSelectionService:
 
             latest_snapshot = factor.get("latest_task_snapshot") or {}
             payload = latest_snapshot.get("payload") or factor.get("task_metadata") or {}
-            if not self.is_reviewed_rdagent_candidate(factor, payload if isinstance(payload, dict) else {}):
-                continue
+            if normalized_mode != "manual_genetic":
+                if not self.is_reviewed_rdagent_candidate(factor, payload if isinstance(payload, dict) else {}):
+                    continue
             candidates.append({
                 "name": name,
                 "category": factor.get("category") or "未分类",
@@ -313,9 +314,15 @@ class FactorSelectionService:
                 "你的任务不是机械打分排序，而是根据研究目标、因子语义、互补性和可计算性，"
                 "只选择适合在单股票 OHLCV 数据上直接计算的基础因子。"
             )
+            manual_scene_constraints = (
+                "7. 手动遗传挖掘只允许选择单股票时间序列可直接计算的基础因子；\n"
+                "8. 不要选择依赖股票池横截面、行业/市值中性化、目标股票绑定或历史自动/RDAgent 挖掘出的复合表达式；\n"
+                "9. 优先选择原子量价因子、基础技术指标或平滑后的单变量时间序列因子，避免把复杂成品 Alpha 当作 seed factor。\n\n"
+            )
         else:
             task_intro = "你是一位专业量化研究员，负责为自动因子挖掘挑选一组最适合作为 seed/base factors 的基础因子。"
             task_constraints = "你的任务不是机械打分排序，而是根据研究目标、因子语义、互补性、历史研究摘要和可进化性，自主选择一组合适的基础因子。"
+            manual_scene_constraints = ""
 
         return (
             f"{task_intro}\n"
@@ -333,7 +340,7 @@ class FactorSelectionService:
             "4. 请在保证质量和互补性的前提下，自主决定最终数量，但不能超过最多选择数量；\n"
             "5. 如果某些因子明显不适合当前目标，可以不选；\n"
             "6. 只允许从候选列表中选择，不要发明新因子名；\n"
-            "7. 如果是手动遗传挖掘场景，优先选择适合单股票量价时间序列直接计算的基础因子，避免选择依赖股票池横截面或自动挖掘结果表达式的因子。\n\n"
+            f"{manual_scene_constraints}"
             "请只输出 JSON，格式如下：\n"
             "{\n"
             "  \"selected_factors\": [\"因子名1\", \"因子名2\"],\n"

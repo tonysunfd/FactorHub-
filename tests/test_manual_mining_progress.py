@@ -4,6 +4,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 from fastapi import BackgroundTasks
 
 from backend.api.routers import mining
@@ -337,3 +338,222 @@ def test_run_auto_mining_tracks_incremental_fitness_history(monkeypatch) -> None
         {"name": "Factor_A", "score": 1.0},
         {"name": "Factor_B", "score": 2.0},
     ]
+
+
+def test_run_auto_campaign_uses_to_thread_and_persists_round_state(monkeypatch) -> None:
+    task_id = mining._create_task("auto_campaign")
+    captured: dict[str, object] = {}
+
+    async def fake_to_thread(func, /, *args, **kwargs):
+        captured["func"] = func
+        captured["kwargs"] = kwargs
+        progress_callback = kwargs["progress_callback"]
+        progress_callback(
+            {
+                "current_round": 1,
+                "total_rounds": 2,
+                "current_generation": 1,
+                "total_generations": 1,
+                "best_fitness": 71.0,
+                "avg_fitness": 68.0,
+                "fitness_history": {"best": [71.0], "average": [68.0]},
+                "candidates": [{"name": "Candidate_1", "score": 71.0}],
+                "rounds": [],
+                "latest_round": {"round_index": 1, "input_base_factors": ["Alpha1"]},
+                "retained_count": 0,
+            }
+        )
+        return {
+            "rounds": [
+                {
+                    "round_index": 1,
+                    "task_id": "campaign-round-1",
+                    "input_base_factors": ["Alpha1"],
+                    "continuation_hypothesis": {"target_goal": "优化 L/S Sharpe"},
+                    "continuation_feedback": {"reason": "继续优化"},
+                    "retained_count": 1,
+                    "retained_factors": [{"name": "Candidate_1", "score": 71.0}],
+                    "all_factors": [{"name": "Candidate_1", "score": 71.0}],
+                }
+            ],
+            "retained_factors": [{"name": "Candidate_1", "score": 71.0}],
+            "final_round_task_id": "campaign-round-1",
+            "final_round_result": {"factors": [{"name": "Candidate_1", "score": 71.0}]},
+            "best_score": 71.0,
+            "avg_score": 68.0,
+            "fitness_history": {"best": [71.0], "average": [68.0]},
+            "selection_mode": "any",
+            "retention_filter": {"match_mode": "any", "score_min": 0},
+        }
+
+    monkeypatch.setattr(mining.asyncio, "to_thread", fake_to_thread)
+
+    request = mining.AutoMiningCampaignRequest(
+        prompt="improve factors",
+        base_factors=["Alpha1"],
+        start_date="2024-01-01",
+        end_date="2024-01-31",
+        universe="hs300",
+        benchmark="hs300",
+        n_groups=5,
+        holding_period=5,
+        exploration_rounds=2,
+        n_candidates_per_round=1,
+        additional_factor_count_per_round=1,
+        factor_update_mode="append",
+        parent_selection_strategy="best_score_so_far",
+        direction="ls_sharpe",
+        neutralize_industry=True,
+        neutralize_cap=True,
+        retention_filter={"match_mode": "any", "score_min": 0},
+    )
+
+    asyncio.run(mining._run_auto_campaign(task_id, request))
+
+    task = mining.mining_tasks[task_id]
+    assert getattr(captured["func"], "__name__", "") == "run_auto_campaign"
+    assert captured["kwargs"]["prompt"] == "improve factors"
+    assert task["status"] == "completed"
+    assert task["current_round"] == 1
+    assert task["retained_count"] == 1
+    assert task["latest_round"]["input_base_factors"] == ["Alpha1"]
+    assert task["rounds"][0]["continuation_hypothesis"]["target_goal"] == "优化 L/S Sharpe"
+    assert task["fitness_history"] == {"best": [71.0], "average": [68.0]}
+
+
+def test_auto_campaign_status_and_results_strip_control_chars(monkeypatch) -> None:
+    task_id = mining._create_task("auto_campaign")
+    dirty_expression = "rank(close)\x00\x1f"
+    mining.mining_tasks[task_id].update(
+        {
+            "status": "completed",
+            "progress": 100,
+            "current_round": 1,
+            "total_rounds": 1,
+            "retained_count": 1,
+            "rounds": [
+                {
+                    "round_index": 1,
+                    "task_id": "campaign-round-1",
+                    "all_factors": [{"name": "Candidate_1", "expression": dirty_expression}],
+                    "retained_factors": [{"name": "Candidate_1", "expression": dirty_expression}],
+                }
+            ],
+            "latest_round": {
+                "round_index": 1,
+                "task_id": "campaign-round-1",
+                "all_factors": [{"name": "Candidate_1", "expression": dirty_expression}],
+            },
+            "result": {
+                "rounds": [
+                    {
+                        "round_index": 1,
+                        "task_id": "campaign-round-1",
+                        "all_factors": [{"name": "Candidate_1", "expression": dirty_expression}],
+                        "retained_factors": [{"name": "Candidate_1", "expression": dirty_expression}],
+                    }
+                ],
+                "retained_factors": [{"name": "Candidate_1", "expression": dirty_expression}],
+                "final_round_result": {"factors": [{"name": "Candidate_1", "expression": dirty_expression}]},
+                "best_score": 1.0,
+                "avg_score": 1.0,
+                "fitness_history": {"best": [1.0], "average": [1.0]},
+            },
+        }
+    )
+
+    status_payload = asyncio.run(mining.get_auto_mining_campaign_status(task_id))
+    result_payload = asyncio.run(mining.get_auto_mining_campaign_results(task_id))
+
+    assert "\x00" not in status_payload["data"]["latest_round"]["all_factors"][0]["expression"]
+    assert "\x1f" not in status_payload["data"]["latest_round"]["all_factors"][0]["expression"]
+    assert "\x00" not in result_payload["data"]["retained_factors"][0]["expression"]
+    assert "\x1f" not in result_payload["data"]["final_round_result"]["factors"][0]["expression"]
+
+
+def test_select_manual_mining_factors_uses_manual_genetic_llm_path(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_select_factors(**kwargs):
+        captured.update(kwargs)
+        return {
+            "selected_factors": ["AlphaClose", "AlphaVolume"],
+            "selection_rationale": "已按手动遗传挖掘场景完成筛选。",
+            "per_factor_reason": {
+                "AlphaClose": "价格因子适合作为单股票 seed factor。",
+                "AlphaVolume": "量能因子可增强可解释性。",
+            },
+            "llm_used": True,
+            "llm_call_mode": "live_api",
+            "llm_model": "deepseek-chat",
+            "llm_provider": "openai_compatible",
+            "llm_base_url": "http://127.0.0.1:4000/v1",
+            "llm_evidence": {
+                "call_mode": "live_api",
+                "provider": "openai_compatible",
+                "model": "deepseek-chat",
+                "base_url": "http://127.0.0.1:4000/v1",
+                "response_id": "resp-manual-1",
+            },
+            "candidate_count": 12,
+        }
+
+    monkeypatch.setattr(mining.auto_factor_mining_service, "select_factors", fake_select_factors)
+
+    request = mining.ManualMiningFactorSelectionRequest(
+        prompt="为当前股票选择适合手动遗传挖掘的基础因子",
+        direction="report_sharpe",
+        stock_code="000001",
+        start_date="2024-01-01",
+        end_date="2024-01-31",
+        fitness_objective="sharpe",
+        max_factor_count=2,
+        candidate_limit=12,
+    )
+
+    result = asyncio.run(mining.select_manual_mining_factors(request))
+
+    assert captured["selection_mode"] == "manual_genetic"
+    assert captured["universe"] == "single_stock"
+    assert captured["benchmark"] == "hs300"
+    assert "当前场景：单股票手动遗传挖掘。" in captured["extra_context"]
+    assert "当前遗传优化目标：sharpe。" in captured["extra_context"]
+    assert "当前目标股票代码：000001。" in captured["extra_context"]
+    assert result["success"] is True
+    assert result["data"]["selected_factors"] == ["AlphaClose", "AlphaVolume"]
+    assert result["data"]["llm_used"] is True
+    assert result["data"]["llm_call_mode"] == "live_api"
+    assert result["data"]["llm_provider"] == "openai_compatible"
+    assert result["data"]["llm_evidence"] == {
+        "call_mode": "live_api",
+        "provider": "openai_compatible",
+        "model": "deepseek-chat",
+        "base_url": "http://127.0.0.1:4000/v1",
+        "response_id": "resp-manual-1",
+    }
+
+
+def test_select_manual_mining_factors_requires_real_llm_result(monkeypatch) -> None:
+    def fake_select_factors(**kwargs):
+        return {
+            "selected_factors": ["AlphaClose"],
+            "selection_rationale": "仅返回筛选结果，但没有真实 LLM 证据。",
+            "per_factor_reason": {"AlphaClose": "价格因子。"},
+            "llm_used": False,
+        }
+
+    monkeypatch.setattr(mining.auto_factor_mining_service, "select_factors", fake_select_factors)
+
+    request = mining.ManualMiningFactorSelectionRequest(
+        prompt="为当前股票选择适合手动遗传挖掘的基础因子",
+        direction="report_sharpe",
+        stock_code="000001",
+        start_date="2024-01-01",
+        end_date="2024-01-31",
+        fitness_objective="sharpe",
+        max_factor_count=1,
+        candidate_limit=12,
+    )
+
+    with pytest.raises(Exception, match="未触发真实 LLM 调用"):
+        asyncio.run(mining.select_manual_mining_factors(request))

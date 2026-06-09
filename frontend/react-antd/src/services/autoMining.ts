@@ -21,6 +21,17 @@ export interface AutoMiningFactorSelectionRequest {
   selection_mode?: "auto" | "manual_genetic";
 }
 
+export interface ManualMiningFactorSelectionRequest {
+  prompt: string;
+  direction?: string;
+  stock_code?: string;
+  start_date: string;
+  end_date: string;
+  fitness_objective?: string;
+  max_factor_count?: number;
+  candidate_limit?: number;
+}
+
 export interface AutoMiningRequest {
   prompt: string;
   base_factors: string[];
@@ -91,6 +102,10 @@ const AUTO_MINING_SELECTION_TIMEOUT = 120000;
 export const autoMiningApi = {
   selectFactors(data: AutoMiningFactorSelectionRequest) {
     return request.post("/mining/auto/select-factors", data, { timeout: AUTO_MINING_SELECTION_TIMEOUT });
+  },
+
+  selectManualFactors(data: ManualMiningFactorSelectionRequest) {
+    return request.post("/mining/manual/select-factors", data, { timeout: AUTO_MINING_SELECTION_TIMEOUT });
   },
 
   startTask(data: AutoMiningRequest) {

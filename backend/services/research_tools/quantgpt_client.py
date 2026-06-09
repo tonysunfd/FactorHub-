@@ -16,6 +16,9 @@ class QuantGPTClient:
         self.timeout = timeout
         self.bearer_token = (os.getenv("QUANTGPT_BEARER_TOKEN") or getattr(settings, "QUANTGPT_BEARER_TOKEN", "") or "").strip()
 
+    def is_configured(self) -> bool:
+        return bool(os.getenv("QUANTGPT_BASE_URL") or getattr(settings, "QUANTGPT_BASE_URL", None))
+
     def _headers(self, accept: str | None = None) -> dict[str, str]:
         headers: dict[str, str] = {}
         if accept:
@@ -23,6 +26,31 @@ class QuantGPTClient:
         if self.bearer_token:
             headers["Authorization"] = f"Bearer {self.bearer_token}"
         return headers
+
+    def _extract_text_content(self, content: Any) -> str:
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            text_parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    normalized = item.strip()
+                    if normalized:
+                        text_parts.append(normalized)
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                item_type = str(item.get("type") or "").strip().lower()
+                if item_type == "text":
+                    text_value = item.get("text")
+                elif item_type == "output_text":
+                    text_value = item.get("text") or item.get("content")
+                else:
+                    text_value = None
+                if isinstance(text_value, str) and text_value.strip():
+                    text_parts.append(text_value.strip())
+            return "\n".join(text_parts).strip()
+        return str(content or "").strip()
 
     async def _get_json(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -35,6 +63,50 @@ class QuantGPTClient:
             resp = await client.post(f"{self.base_url}{path}", json=payload, headers=self._headers())
             resp.raise_for_status()
             return resp.json()
+
+    async def chat_json(
+        self,
+        *,
+        api_key: str,
+        model: str,
+        base_url: str,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.2,
+        max_tokens: int = 1800,
+    ) -> dict[str, Any]:
+        try:
+            from openai import OpenAI
+        except ImportError as exc:
+            raise RuntimeError("openai SDK 未安装，无法执行真实 LLM 调用。") from exc
+
+        client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+        )
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format={"type": "json_object"},
+        )
+        content = self._extract_text_content(response.choices[0].message.content)
+        content = content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        try:
+            parsed = json.loads(content)
+        except Exception as exc:
+            raise ValueError(f"LLM 返回了无法解析的 JSON：{content[:200]}") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("LLM 返回格式错误，期望 JSON 对象。")
+        return {
+            "content": parsed,
+            "response_id": str(getattr(response, "id", "") or "").strip(),
+            "provider": "openai_compatible",
+        }
 
     def _extract_mcp_payload(self, data: Any) -> Any:
         if isinstance(data, dict):

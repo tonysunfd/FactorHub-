@@ -12,7 +12,7 @@ import {
   PlayCircleOutlined
 } from '@ant-design/icons'
 import { APP_NAME, APP_VERSION } from './config/app'
-import { getBackendStatus, requestBackendControl, type BackendControlResponse, type BackendStatus } from './services/backendControl'
+import { getBackendStatus, requestBackendControl, resolveBackendBaseUrl, type BackendControlResponse, type BackendStatus } from './services/backendControl'
 import routes from './utils/router'
 import './styles/global.css'
 
@@ -351,7 +351,7 @@ function App() {
             </p>
           </div>
           <div style={{ display: 'flex', gap: '24px' }}>
-            <a href="http://localhost:8001/docs" target="_blank" rel="noopener" style={{ textDecoration: 'none', color: '#64748b', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '8px', transition: 'all 0.3s ease' }}>
+            <a href={`${resolveBackendBaseUrl()}/docs`} target="_blank" rel="noopener" style={{ textDecoration: 'none', color: '#64748b', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '8px', transition: 'all 0.3s ease' }}>
               <span style={{ width: '36px', height: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(59, 130, 246, 0.1)', border: '1px solid rgba(59, 130, 246, 0.3)', borderRadius: '4px', fontFamily: '"SF Mono", monospace', fontSize: '10px', fontWeight: 600 }}>
                 接口
               </span>

@@ -132,8 +132,25 @@ const FactorTaskDetailsPanel: React.FC<FactorTaskDetailsPanelProps> = ({ taskId,
 
   const quantSummaryItems = [
     { label: 'Primary Problem', value: quantSummary.primary_problem ? fmtText(quantSummary.primary_problem) : undefined },
+    { label: 'Secondary Problem', value: quantSummary.secondary_problem ? fmtText(quantSummary.secondary_problem) : undefined },
     { label: 'Recommended Goal', value: quantSummary.recommended_goal ? fmtText(quantSummary.recommended_goal) : undefined },
     { label: 'Improvement Reason', value: quantSummary.improvement_reason ? fmtText(quantSummary.improvement_reason) : undefined },
+    { label: 'Selection Instructions', value: quantSummary.selection_instructions ? fmtText(quantSummary.selection_instructions) : undefined },
+    {
+      label: 'Preferred Keywords',
+      value: Array.isArray(quantSummary.preferred_keywords) && quantSummary.preferred_keywords.length
+        ? quantSummary.preferred_keywords.join('、')
+        : undefined,
+    },
+    {
+      label: 'Avoid Keywords',
+      value: Array.isArray(quantSummary.avoid_keywords) && quantSummary.avoid_keywords.length
+        ? quantSummary.avoid_keywords.join('、')
+        : undefined,
+    },
+    { label: 'Selection Confidence', value: quantSummary.selection_confidence !== undefined ? fmtText(quantSummary.selection_confidence) : undefined },
+    { label: 'Should Adjust Base Factors', value: quantSummary.should_adjust_base_factors !== undefined ? fmtText(quantSummary.should_adjust_base_factors) : undefined },
+    { label: 'Hold Reason', value: quantSummary.hold_reason ? fmtText(quantSummary.hold_reason) : undefined },
     {
       label: 'Base Factors',
       value: Array.isArray(quantSummary.base_factors) && quantSummary.base_factors.length
