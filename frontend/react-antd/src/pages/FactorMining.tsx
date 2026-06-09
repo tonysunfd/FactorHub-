@@ -337,6 +337,12 @@ interface RDAgentLoopSnapshot {
   candidateCount: number;
 }
 
+interface RDAgentConfigSnapshotItem {
+  label: string;
+  value: string;
+  tone?: "default" | "primary";
+}
+
 type RDAgentTraceDetailTab = "research" | "development" | "feedback";
 
 interface AutoMiningSeedState {
@@ -3087,6 +3093,50 @@ const FactorMining: React.FC = () => {
     </div>
   );
 
+  const getRDAgentConfigSnapshot = (): RDAgentConfigSnapshotItem[] => {
+    const values = rdAgentForm.getFieldsValue();
+    const objective = String(values.objective || "").trim();
+    const universe = String(values.universe || "").trim();
+    const candidateUniverse = Array.isArray(values.candidate_universe) ? values.candidate_universe : [];
+    const baseFactors = Array.isArray(values.base_factors) ? values.base_factors : [];
+    const loops = values.max_iterations ?? "-";
+    const candidatesPerIteration = values.candidates_per_iteration ?? "-";
+    const direction = String(values.direction || "score");
+    const thresholds = [
+      values.min_rank_ic !== undefined && values.min_rank_ic !== null ? `rankIC >= ${values.min_rank_ic}` : "",
+      values.min_valid_coverage !== undefined && values.min_valid_coverage !== null ? `Coverage >= ${values.min_valid_coverage}` : "",
+      values.max_correlation_with_sota !== undefined && values.max_correlation_with_sota !== null ? `Corr <= ${values.max_correlation_with_sota}` : "",
+    ].filter(Boolean);
+
+    return [
+      {
+        label: "当前任务",
+        value: objective || "未填写目标",
+        tone: "primary",
+      },
+      {
+        label: "股票池 / 基准字段",
+        value: `${universe || "未选股票池"} / ${candidateUniverse.length} 个字段`,
+      },
+      {
+        label: "Loop 预算",
+        value: `${loops} 轮 · 每轮 ${candidatesPerIteration} 个候选`,
+      },
+      {
+        label: "基础因子",
+        value: baseFactors.length ? `${baseFactors.length} 个已选基础因子` : "从空白上下文开始",
+      },
+      {
+        label: "优化方向",
+        value: direction,
+      },
+      {
+        label: "入选阈值",
+        value: thresholds.length ? thresholds.join("，") : "使用默认阈值",
+      },
+    ];
+  };
+
   const getRDAgentRoundSnapshot = (round?: RDAgentTraceRound | null): RDAgentLoopSnapshot => {
     const candidates = round?.candidates || round?.all_factors || [];
     const evaluation = round?.evaluation || {};
@@ -3181,6 +3231,8 @@ const FactorMining: React.FC = () => {
           const candidates = round.candidates || round.all_factors || [];
           const roundKey = `round-${round.round_index}`;
           const activeDetailTab = rdagentTraceDetailTab[roundKey] || "research";
+          const snapshot = getRDAgentRoundSnapshot(round);
+          const nextHypothesis = String(feedback.next_hypothesis || "").trim();
           const workspaceSummary = [
             evaluation.report_ref,
             evaluation.summary,
@@ -3203,7 +3255,7 @@ const FactorMining: React.FC = () => {
                     <Tag color="purple">{hypothesis.research_direction || "simple_baseline"}</Tag>
                   </Space>
                 </div>
-                <div className="rdagent-trace-score">Best {getRDAgentRoundSnapshot(round).bestScore.toFixed(1)}</div>
+                <div className="rdagent-trace-score">Best {snapshot.bestScore.toFixed(1)}</div>
               </div>
             ),
             children: (
@@ -3224,6 +3276,24 @@ const FactorMining: React.FC = () => {
                       { label: "Feedback", value: "feedback" },
                     ]}
                   />
+                </div>
+                <div className="rdagent-trace-meta-grid">
+                  <div className="rdagent-trace-meta-card">
+                    <div className="rdagent-trace-meta-label">Trace ID</div>
+                    <div className="rdagent-trace-meta-value" title={round.task_id}>{round.task_id || "暂无"}</div>
+                  </div>
+                  <div className="rdagent-trace-meta-card">
+                    <div className="rdagent-trace-meta-label">候选任务</div>
+                    <div className="rdagent-trace-meta-value">{snapshot.candidateCount} 个</div>
+                  </div>
+                  <div className="rdagent-trace-meta-card">
+                    <div className="rdagent-trace-meta-label">基础因子</div>
+                    <div className="rdagent-trace-meta-value">{snapshot.baseFactors.length ? snapshot.baseFactors.join("，") : "无"}</div>
+                  </div>
+                  <div className="rdagent-trace-meta-card">
+                    <div className="rdagent-trace-meta-label">下一轮假设</div>
+                    <div className="rdagent-trace-meta-value">{nextHypothesis || "当前轮未给出"}</div>
+                  </div>
                 </div>
               </div>
 
@@ -3618,6 +3688,14 @@ const FactorMining: React.FC = () => {
             </div>
           </div>
           <Form form={rdAgentForm} layout="vertical" onFinish={startRDAgentMining}>
+            <div className="rdagent-config-snapshot">
+              {getRDAgentConfigSnapshot().map((item) => (
+                <div key={item.label} className={`rdagent-config-snapshot-card rdagent-config-snapshot-card-${item.tone || "default"}`}>
+                  <div className="rdagent-config-snapshot-label">{item.label}</div>
+                  <div className="rdagent-config-snapshot-value">{item.value}</div>
+                </div>
+              ))}
+            </div>
             <Collapse
               defaultActiveKey={["objective", "bootstrap"]}
               className="rdagent-config-collapse"

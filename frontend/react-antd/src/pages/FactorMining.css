@@ -249,6 +249,44 @@
   padding: 4px 16px 8px !important;
 }
 
+.factor-mining-container .rdagent-config-snapshot {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.factor-mining-container .rdagent-config-snapshot-card {
+  min-width: 0;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.factor-mining-container .rdagent-config-snapshot-card-primary {
+  background: linear-gradient(180deg, rgba(219, 234, 254, 0.88) 0%, rgba(255, 255, 255, 0.98) 100%);
+  border-color: rgba(59, 130, 246, 0.18);
+}
+
+.factor-mining-container .rdagent-config-snapshot-label {
+  margin-bottom: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #64748b;
+}
+
+.factor-mining-container .rdagent-config-snapshot-value {
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.65;
+  color: #0f172a;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 /* ========== 提示文本 ========== */
 .factor-mining-container .text-hint {
   font-size: 13px;
@@ -815,6 +853,40 @@
   color: #64748b;
 }
 
+.factor-mining-container .rdagent-trace-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.factor-mining-container .rdagent-trace-meta-card {
+  min-width: 0;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(248, 250, 252, 0.92);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.factor-mining-container .rdagent-trace-meta-label {
+  margin-bottom: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #64748b;
+}
+
+.factor-mining-container .rdagent-trace-meta-value {
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.65;
+  color: #0f172a;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .factor-mining-container .rdagent-trace-card .ant-space,
 .factor-mining-container .rdagent-trace-card .ant-space-item,
 .factor-mining-container .rdagent-trace-card .ant-row,
@@ -1222,7 +1294,8 @@
 
   .factor-mining-container .rdagent-loop-overview,
   .factor-mining-container .rdagent-overview-metrics,
-  .factor-mining-container .rdagent-round-digest-grid {
+  .factor-mining-container .rdagent-round-digest-grid,
+  .factor-mining-container .rdagent-trace-meta-grid {
     grid-template-columns: 1fr;
   }
 
