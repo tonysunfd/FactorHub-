@@ -335,6 +335,8 @@ interface RDAgentLoopSnapshot {
   candidateCount: number;
 }
 
+type RDAgentTraceDetailTab = "research" | "development" | "feedback";
+
 interface AutoMiningSeedState {
   result: AutoMiningResult | null;
   status: MiningStatus | null;
@@ -969,6 +971,7 @@ const FactorMining: React.FC = () => {
   const [rdagentBootstrapMode, setRdagentBootstrapMode] = useState<RDAgentBootstrapMode>("llm_auto");
   const [expandedReportUrl, setExpandedReportUrl] = useState<string | null>(null);
   const [expandedDetailsKey, setExpandedDetailsKey] = useState<string | null>(null);
+  const [rdagentTraceDetailTab, setRdagentTraceDetailTab] = useState<Record<string, RDAgentTraceDetailTab>>({});
   const [isMobileView, setIsMobileView] = useState(typeof window !== "undefined" ? window.innerWidth <= 768 : false);
   const [autoSeedState, setAutoSeedState] = useState<AutoMiningSeedState | null>(null);
   const [autoWorkflowMode, setAutoWorkflowMode] = useState<"single" | "campaign">("single");
@@ -2901,8 +2904,8 @@ const FactorMining: React.FC = () => {
             <div className="rdagent-overview-title">{finished ? "Loop 已完成" : "Loop 进行中"}</div>
             <div className="rdagent-overview-copy">
               {finished
-                ? "先看当前阶段、Loop 指标和 Trace，再决定是否人工确认或继续挖掘。"
-                : "这里是运行工作台，配置在左侧，当前 Loop 证据和候选在右侧持续刷新。"}
+                ? "先确认当前轮结论，再检查 Trace 和人工决策。"
+                : "左侧配置研究边界，右侧持续刷新当前 Loop 的研究、实现与反馈。"}
             </div>
           </div>
           <div className="rdagent-overview-badge">
@@ -3167,6 +3170,17 @@ const FactorMining: React.FC = () => {
           const feedback = round.feedback || {};
           const evaluation = round.evaluation || {};
           const candidates = round.candidates || round.all_factors || [];
+          const roundKey = `round-${round.round_index}`;
+          const activeDetailTab = rdagentTraceDetailTab[roundKey] || "research";
+          const workspaceSummary = [
+            evaluation.report_ref,
+            evaluation.summary,
+            evaluation.selection_rationale,
+            feedback.reason,
+          ]
+            .map((item) => String(item || "").trim())
+            .filter(Boolean)
+            .join("\n\n");
           return {
             key: `round-${round.round_index}`,
             label: (
@@ -3185,33 +3199,90 @@ const FactorMining: React.FC = () => {
             ),
             children: (
               <Card key={`${round.task_id}-${round.round_index}`} className="rdagent-trace-card" size="small" bordered={false}>
-              <div className="rdagent-trace-section">
-                <div className="rdagent-trace-label">Hypothesis</div>
-                <div className="rdagent-trace-text">{hypothesis.statement || "暂无研究假设"}</div>
+              <div className="rdagent-trace-workspace">
+                <div className="rdagent-trace-workspace-header">
+                  <div className="rdagent-trace-workspace-title">
+                    <span className="rdagent-trace-trace-name" title={round.task_id}>{round.task_id}</span>
+                    <span className="rdagent-trace-trace-caption">Trace name</span>
+                  </div>
+                  <Segmented
+                    size="small"
+                    value={activeDetailTab}
+                    onChange={(value) => setRdagentTraceDetailTab((prev) => ({ ...prev, [roundKey]: value as RDAgentTraceDetailTab }))}
+                    options={[
+                      { label: "Research", value: "research" },
+                      { label: "Development", value: "development" },
+                      { label: "Feedback", value: "feedback" },
+                    ]}
+                  />
+                </div>
               </div>
 
-              <Row gutter={[12, 12]}>
-                <Col xs={24} md={12}>
-                  <div className="rdagent-trace-section">
-                    <div className="rdagent-trace-label">Experiment Inputs</div>
-                    <Space wrap>
-                      {getRDAgentRoundSnapshot(round).baseFactors.map((name) => <Tag key={`${round.round_index}-${name}`}>{name}</Tag>)}
-                      {!getRDAgentRoundSnapshot(round).baseFactors.length ? <span className="text-hint">无基础因子上下文</span> : null}
-                    </Space>
-                  </div>
-                </Col>
-                <Col xs={24} md={12}>
-                  <div className="rdagent-trace-section">
-                    <div className="rdagent-trace-label">Evaluation</div>
-                    <Space wrap>
-                      <Tag color="green">Avg {getRDAgentRoundSnapshot(round).avgScore.toFixed(1)}</Tag>
-                      <Tag>候选 {getRDAgentRoundSnapshot(round).candidateCount}</Tag>
-                      <Tag color="cyan">保留 {getRDAgentRoundSnapshot(round).retainedCount}</Tag>
-                    </Space>
-                    {evaluation.report_ref ? <div className="rdagent-trace-muted">{evaluation.report_ref}</div> : null}
-                  </div>
-                </Col>
-              </Row>
+              {activeDetailTab === "research" ? (
+                <div className="rdagent-trace-section">
+                  <div className="rdagent-trace-label">Hypothesis</div>
+                  <div className="rdagent-trace-text">{hypothesis.statement || "暂无研究假设"}</div>
+                  {hypothesis.research_direction ? (
+                    <div className="rdagent-trace-muted" style={{ marginTop: 10 }}>
+                      研究方向：{String(hypothesis.research_direction)}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {activeDetailTab === "development" ? (
+                <Row gutter={[12, 12]}>
+                  <Col xs={24} md={12}>
+                    <div className="rdagent-trace-section">
+                      <div className="rdagent-trace-label">Experiment Inputs</div>
+                      <Space wrap>
+                        {getRDAgentRoundSnapshot(round).baseFactors.map((name) => <Tag key={`${round.round_index}-${name}`}>{name}</Tag>)}
+                        {!getRDAgentRoundSnapshot(round).baseFactors.length ? <span className="text-hint">无基础因子上下文</span> : null}
+                      </Space>
+                    </div>
+                  </Col>
+                  <Col xs={24} md={12}>
+                    <div className="rdagent-trace-section">
+                      <div className="rdagent-trace-label">Workspace Summary</div>
+                      <div className="rdagent-trace-text">{workspaceSummary || "当前轮尚未返回可展开的实现摘要。"}</div>
+                    </div>
+                  </Col>
+                </Row>
+              ) : null}
+
+              {activeDetailTab === "feedback" ? (
+                <Row gutter={[12, 12]}>
+                  <Col xs={24} md={12}>
+                    <div className="rdagent-trace-section">
+                      <div className="rdagent-trace-label">Evaluation</div>
+                      <Space wrap>
+                        <Tag color="green">Avg {getRDAgentRoundSnapshot(round).avgScore.toFixed(1)}</Tag>
+                        <Tag>候选 {getRDAgentRoundSnapshot(round).candidateCount}</Tag>
+                        <Tag color="cyan">保留 {getRDAgentRoundSnapshot(round).retainedCount}</Tag>
+                      </Space>
+                      {evaluation.report_ref ? <div className="rdagent-trace-muted">{evaluation.report_ref}</div> : null}
+                    </div>
+                  </Col>
+                  <Col xs={24} md={12}>
+                    <Alert
+                      type={feedback.hypothesis_evaluation === "supported" ? "success" : "warning"}
+                      showIcon
+                      message="Feedback"
+                      description={
+                        <Space direction="vertical" size={4}>
+                          <span>{feedback.observations || "暂无反馈"}</span>
+                          {feedback.next_hypothesis ? <span>下一轮：{feedback.next_hypothesis}</span> : null}
+                        </Space>
+                      }
+                    />
+                  </Col>
+                </Row>
+              ) : null}
+
+              <div className="rdagent-trace-section">
+                <div className="rdagent-trace-label">Candidates</div>
+                <div className="rdagent-trace-muted">候选区复用统一评价结果，保留当前轮的通过与淘汰证据。</div>
+              </div>
 
               <div className="rdagent-candidate-grid">
                 {candidates.map((factor: any, index: number) => {
@@ -3256,18 +3327,6 @@ const FactorMining: React.FC = () => {
                   );
                 })}
               </div>
-
-              <Alert
-                type={feedback.hypothesis_evaluation === "supported" ? "success" : "warning"}
-                showIcon
-                message="Feedback"
-                description={
-                  <Space direction="vertical" size={4}>
-                    <span>{feedback.observations || "暂无反馈"}</span>
-                    {feedback.next_hypothesis ? <span>下一轮：{feedback.next_hypothesis}</span> : null}
-                  </Space>
-                }
-              />
               </Card>
             ),
           };

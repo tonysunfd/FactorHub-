@@ -749,6 +749,44 @@
   min-width: 0;
 }
 
+.factor-mining-container .rdagent-trace-workspace {
+  margin-bottom: 14px;
+}
+
+.factor-mining-container .rdagent-trace-workspace-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.factor-mining-container .rdagent-trace-workspace-title {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.factor-mining-container .rdagent-trace-trace-name {
+  min-width: 0;
+  max-width: 100%;
+  font-size: 14px;
+  font-weight: 700;
+  color: #0f172a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.factor-mining-container .rdagent-trace-trace-caption {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #64748b;
+}
+
 .factor-mining-container .rdagent-trace-card .ant-space,
 .factor-mining-container .rdagent-trace-card .ant-space-item,
 .factor-mining-container .rdagent-trace-card .ant-row,
@@ -818,6 +856,7 @@
   color: #334155;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .factor-mining-container .rdagent-trace-muted {
@@ -1138,7 +1177,8 @@
   .factor-mining-container .rdagent-overview-hero,
   .factor-mining-container .rdagent-round-digest-header,
   .factor-mining-container .rdagent-trace-header,
-  .factor-mining-container .rdagent-candidate-top {
+  .factor-mining-container .rdagent-candidate-top,
+  .factor-mining-container .rdagent-trace-workspace-header {
     flex-direction: column;
   }
 
