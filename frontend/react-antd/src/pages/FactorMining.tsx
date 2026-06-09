@@ -3264,16 +3264,17 @@ const FactorMining: React.FC = () => {
                 <div className="rdagent-trace-workspace-header">
                   <div className="rdagent-trace-workspace-title">
                     <span className="rdagent-trace-trace-name" title={round.task_id}>{round.task_id}</span>
-                    <span className="rdagent-trace-trace-caption">Trace name</span>
+                    <span className="rdagent-trace-trace-caption">Loop trace</span>
                   </div>
                   <Segmented
                     size="small"
+                    block={isMobileView}
                     value={activeDetailTab}
                     onChange={(value) => setRdagentTraceDetailTab((prev) => ({ ...prev, [roundKey]: value as RDAgentTraceDetailTab }))}
                     options={[
-                      { label: "Research", value: "research" },
-                      { label: "Experiment", value: "development" },
-                      { label: "Feedback", value: "feedback" },
+                      { label: "研究", value: "research" },
+                      { label: "实验", value: "development" },
+                      { label: "反馈", value: "feedback" },
                     ]}
                   />
                 </div>
@@ -3291,8 +3292,8 @@ const FactorMining: React.FC = () => {
                     <div className="rdagent-trace-meta-value">{snapshot.baseFactors.length ? snapshot.baseFactors.join("，") : "无"}</div>
                   </div>
                   <div className="rdagent-trace-meta-card">
-                    <div className="rdagent-trace-meta-label">下一轮假设</div>
-                    <div className="rdagent-trace-meta-value">{nextHypothesis || "当前轮未给出"}</div>
+                    <div className="rdagent-trace-meta-label">下一步线索</div>
+                    <div className="rdagent-trace-meta-value">{nextHypothesis || "当前轮未给出下一步线索"}</div>
                   </div>
                 </div>
               </div>
@@ -3649,42 +3650,35 @@ const FactorMining: React.FC = () => {
               }
             />
           ) : null}
-          <Button
-            block
-            style={{ marginBottom: 16 }}
-            loading={rdagentLoadingLatest}
-            disabled={mining}
-            onClick={() => void loadLatestRDAgentResult()}
-          >
-            加载最近 RDAgent 结果
-          </Button>
-          <Button
-            block
-            danger
-            icon={<ExclamationCircleOutlined />}
-            style={{ marginBottom: 16 }}
-            disabled={!autoCampaignStatus?.task_id || ["completed", "failed", "cancelled"].includes(String(autoCampaignStatus?.status || ""))}
-            loading={loading && mining}
-            onClick={() => void cancelRDAgentTask()}
-          >
-            终止当前 RDAgent 任务
-          </Button>
+          <div className="rdagent-config-actions">
+            <Button
+              block
+              loading={rdagentLoadingLatest}
+              disabled={mining}
+              onClick={() => void loadLatestRDAgentResult()}
+            >
+              加载最近结果
+            </Button>
+            <Button
+              block
+              danger
+              icon={<ExclamationCircleOutlined />}
+              disabled={!autoCampaignStatus?.task_id || ["completed", "failed", "cancelled"].includes(String(autoCampaignStatus?.status || ""))}
+              loading={loading && mining}
+              onClick={() => void cancelRDAgentTask()}
+            >
+              终止任务
+            </Button>
+          </div>
           <div className="rdagent-config-toolbar">
-            <div className="rdagent-mini-summary">
-              <span className="rdagent-mini-summary-label">Workspace</span>
-              <div className="rdagent-mini-summary-head">
-                <strong>这是配置工作台，不是说明页。</strong>
-                <span>先设目标与研究边界，再看右侧 Loop 和 Trace。</span>
-              </div>
-              <div className="rdagent-mini-summary-tags">
-                <Tag color="blue">Objective</Tag>
-                <Tag color="cyan">Universe</Tag>
-                <Tag color="purple">Loop</Tag>
-                <Tag color="gold">Threshold</Tag>
+            <div className="rdagent-config-intro">
+              <div className="rdagent-config-intro-title">先配置，再观察 Trace。</div>
+              <div className="rdagent-config-intro-copy">
+                左侧只负责目标、边界和阈值；右侧持续展示当前 loop 的研究、实验和反馈。
               </div>
             </div>
             <div className="rdagent-config-note">
-              表达式契约、字段别名和失败原因都会在右侧 Trace 中落盘展示。
+              表达式契约、字段别名和失败原因统一在右侧 Trace 查看。
             </div>
           </div>
           <Form form={rdAgentForm} layout="vertical" onFinish={startRDAgentMining}>
@@ -3742,7 +3736,7 @@ const FactorMining: React.FC = () => {
                     <div>
                       <div className="rdagent-bootstrap-mode-title">字段与基础因子来源</div>
                       <div className="rdagent-bootstrap-mode-desc">
-                        决定当前 round 的输入边界和研究起点。
+                        决定当前 loop 的输入边界和初始研究上下文。
                       </div>
                     </div>
                     <Segmented
@@ -3762,7 +3756,7 @@ const FactorMining: React.FC = () => {
                         </Button>
                       </Form.Item>
                       <div className="text-hint" style={{ marginBottom: 12 }}>
-                        自动生成一份 bootstrap，仍可继续手动改。
+                        先生成一份初稿，随后仍可手动调整。
                       </div>
                       {renderRDAgentBootstrapSummary()}
                     </div>
@@ -3799,7 +3793,7 @@ const FactorMining: React.FC = () => {
                 </Form.Item>
                 {rdagentBootstrapMode === "llm_auto" ? (
                   <div className="text-hint" style={{ marginTop: -8, marginBottom: 12 }}>
-                    自动生成后仍可继续手动调整。
+                    自动生成只作为起点，不会锁定后续手动修改。
                   </div>
                 ) : null}
                 <Form.Item label="SOTA 分类 ID" name="sota_library_id">
@@ -3889,7 +3883,7 @@ const FactorMining: React.FC = () => {
       </Col>
 
       <Col xs={24} lg={16} className="rdagent-result-column">
-        <Card title="RDAgent 因子挖掘结果" className="result-card">{renderStatusCard()}</Card>
+        <Card title="RDAgent Loop 与 Trace" className="result-card">{renderStatusCard()}</Card>
       </Col>
     </Row>
   );
