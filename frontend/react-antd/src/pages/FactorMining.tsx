@@ -3084,7 +3084,7 @@ const FactorMining: React.FC = () => {
 
   const getRDAgentCorrelationDisplay = (value: any): RDAgentCorrelationDisplay => {
     const numeric = Number(value);
-    if (!Number.isFinite(numeric) || numeric <= 0) {
+    if (!Number.isFinite(numeric)) {
       return {
         text: "Corr 未计算",
         color: "default",
@@ -3564,7 +3564,7 @@ const FactorMining: React.FC = () => {
                         {!correlationDisplay.placeholder ? <Tag color={correlationDisplay.color}>{correlationDisplay.text}</Tag> : null}
                       </Space>
                       {correlationDisplay.placeholder ? (
-                        <div className="rdagent-candidate-meta-note">与 SOTA 的相关性当前还是占位值，后端尚未写入真实相关性计算结果。</div>
+                        <div className="rdagent-candidate-meta-note">当前候选暂无可对齐的 SOTA 因子值样本，因此未生成相关性结果。</div>
                       ) : null}
                       {diagnostics.length ? (
                         <div className="rdagent-candidate-diagnostics">
@@ -3662,7 +3662,7 @@ const FactorMining: React.FC = () => {
                         {!correlationDisplay.placeholder ? <Tag color={correlationDisplay.color}>{correlationDisplay.text}</Tag> : null}
                       </Space>
                       {correlationDisplay.placeholder ? (
-                        <div className="rdagent-candidate-meta-note">当前报告中的相关性还是占位值，不代表真实相关性为 0。</div>
+                        <div className="rdagent-candidate-meta-note">当前报告暂无可对齐的 SOTA 因子值样本，因此未生成相关性结果。</div>
                       ) : null}
                     </div>
                   );
@@ -4349,7 +4349,7 @@ const FactorMining: React.FC = () => {
                               {!correlationDisplay.placeholder ? <Tag color={correlationDisplay.color}>{correlationDisplay.text}</Tag> : null}
                             </Space>
                             {correlationDisplay.placeholder ? (
-                              <div className="rdagent-candidate-meta-note">相关性指标尚未计算完成，当前显示的是占位态。</div>
+                              <div className="rdagent-candidate-meta-note">当前候选暂无可对齐的 SOTA 因子值样本，因此未生成相关性结果。</div>
                             ) : null}
                             {diagnostics.length ? (
                               <div className="rdagent-candidate-diagnostics">

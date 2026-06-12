@@ -245,6 +245,7 @@ class FactorEvaluationService:
         merged_meta.setdefault("direction", direction)
         merged_meta["stock_count"] = int(clean_panel["stock_code"].nunique())
         merged_meta["date_count"] = len(spread_series)
+        merged_meta.setdefault("factor_snapshot", self._serialize_factor_snapshot(clean_panel))
 
         execution_result = EngineExecutionResult(
             raw_expression=expression,
@@ -275,6 +276,7 @@ class FactorEvaluationService:
             diagnostics=execution_result.diagnostics,
             report_url=report_url,
             execution_meta=execution_result.execution_meta,
+            factor_series=clean_panel["factor"].copy(),
         )
 
     def evaluate_factor_expression(
@@ -427,6 +429,30 @@ class FactorEvaluationService:
             "drawdown": round(drawdown_score, 2),
             "total_score": round(total, 2),
         }
+
+    @staticmethod
+    def _serialize_factor_snapshot(panel: pd.DataFrame) -> list[dict[str, Any]]:
+        if panel.empty:
+            return []
+
+        snapshot = panel.loc[:, ["date", "stock_code", "factor"]].copy()
+        snapshot = snapshot.dropna(subset=["date", "stock_code", "factor"])
+        if snapshot.empty:
+            return []
+
+        snapshot["date"] = pd.to_datetime(snapshot["date"], errors="coerce")
+        snapshot = snapshot.dropna(subset=["date"])
+        if snapshot.empty:
+            return []
+
+        return [
+            {
+                "date": row.date.strftime("%Y-%m-%d"),
+                "stock_code": str(row.stock_code),
+                "factor": float(row.factor),
+            }
+            for row in snapshot.itertuples(index=False)
+        ]
 
     def build_anti_overfit_result(
         self,

@@ -6,6 +6,8 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+import pandas as pd
+
 from backend.services.auto_factor_mining_service import AutoFactorMiningService
 from backend.services.expression_schema import FactorEvaluationResult
 from backend.services.llm_config_service import llm_config_service
@@ -249,13 +251,13 @@ class RDAgentFactorMiningService:
         return {
             "task_id": task_id,
             "objective": config.objective,
-            "rounds": rounds,
-            "retained_factors": retained_factors,
-            "watchlist_factors": watchlist_factors,
-            "top_factors": top_factors,
-            "sota_candidates": sota_candidates,
+            "rounds": self._sanitize_payload(rounds),
+            "retained_factors": self._sanitize_payload(retained_factors),
+            "watchlist_factors": self._sanitize_payload(watchlist_factors),
+            "top_factors": self._sanitize_payload(top_factors),
+            "sota_candidates": self._sanitize_payload(sota_candidates),
             "fitness_history": fitness_history,
-            "final_round_result": final_round_result,
+            "final_round_result": self._sanitize_payload(final_round_result),
             "continue_mining_request": self._build_continue_request(
                 config=config,
                 final_round=final_round,
@@ -777,6 +779,7 @@ class RDAgentFactorMiningService:
                 "source": "rdagent",
             },
             "execution_meta": evaluation.execution_meta,
+            "_factor_frame": self._extract_factor_frame({"execution_meta": evaluation.execution_meta}),
         }
 
     def _apply_acceptance_policy(self, candidate: dict[str, Any], policy: dict[str, Any], rank: int) -> None:
@@ -836,31 +839,106 @@ class RDAgentFactorMiningService:
                     "name": candidate.get("name"),
                     "expression": expression,
                     "score": float(candidate.get("score") or 0.0),
+                    "factor_snapshot": ((candidate.get("execution_meta") or {}).get("factor_snapshot") or []),
                 }
             )
         merged.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
         return merged[:20]
 
-    @staticmethod
-    def _estimate_sota_correlation(candidate: dict[str, Any], sota_candidates: list[dict[str, Any]]) -> float:
-        expression = str(candidate.get("expression") or "").strip()
-        if not expression or not isinstance(sota_candidates, list):
-            return 0.0
-        expression_tokens = set(_tokenize_expression(expression))
-        if not expression_tokens:
+    @classmethod
+    def _estimate_sota_correlation(cls, candidate: dict[str, Any], sota_candidates: list[dict[str, Any]]) -> float:
+        if not isinstance(sota_candidates, list):
             return 0.0
 
-        max_overlap = 0.0
+        candidate_frame = cls._extract_factor_frame(candidate)
+        if candidate_frame.empty:
+            return 0.0
+
+        max_correlation = 0.0
         for sota_candidate in sota_candidates:
-            sota_expression = str((sota_candidate or {}).get("expression") or "").strip()
-            if not sota_expression:
+            sota_frame = cls._extract_factor_frame(sota_candidate or {})
+            if sota_frame.empty:
                 continue
-            sota_tokens = set(_tokenize_expression(sota_expression))
-            if not sota_tokens:
+            correlation = cls._calculate_factor_frame_correlation(candidate_frame, sota_frame)
+            max_correlation = max(max_correlation, correlation)
+        return round(max_correlation, 4)
+
+    @staticmethod
+    def _extract_factor_frame(payload: dict[str, Any]) -> pd.DataFrame:
+        runtime_frame = payload.get("_factor_frame")
+        if isinstance(runtime_frame, pd.DataFrame):
+            return runtime_frame.copy()
+
+        execution_meta = payload.get("execution_meta") or {}
+        snapshot = execution_meta.get("factor_snapshot")
+        if snapshot is None:
+            snapshot = payload.get("factor_snapshot")
+        return RDAgentFactorMiningService._factor_frame_from_snapshot(snapshot)
+
+    @staticmethod
+    def _factor_frame_from_snapshot(snapshot: Any) -> pd.DataFrame:
+        if not isinstance(snapshot, list) or not snapshot:
+            return pd.DataFrame(columns=["date", "stock_code", "factor"])
+
+        frame = pd.DataFrame(snapshot)
+        required_columns = {"date", "stock_code", "factor"}
+        if not required_columns.issubset(frame.columns):
+            return pd.DataFrame(columns=["date", "stock_code", "factor"])
+
+        frame = frame.loc[:, ["date", "stock_code", "factor"]].copy()
+        frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+        frame["stock_code"] = frame["stock_code"].astype(str)
+        frame["factor"] = pd.to_numeric(frame["factor"], errors="coerce")
+        frame = frame.dropna(subset=["date", "stock_code", "factor"])
+        return frame
+
+    @staticmethod
+    def _calculate_factor_frame_correlation(left: pd.DataFrame, right: pd.DataFrame) -> float:
+        if left.empty or right.empty:
+            return 0.0
+
+        merged = left.merge(right, on=["date", "stock_code"], how="inner", suffixes=("_left", "_right"))
+        merged["factor_left"] = pd.to_numeric(merged["factor_left"], errors="coerce")
+        merged["factor_right"] = pd.to_numeric(merged["factor_right"], errors="coerce")
+        merged = merged.dropna(subset=["factor_left", "factor_right"])
+        if len(merged) < 2:
+            return 0.0
+
+        pearson_values: list[float] = []
+        spearman_values: list[float] = []
+        for _, group in merged.groupby("date"):
+            if len(group) < 2:
                 continue
-            overlap = len(expression_tokens & sota_tokens) / max(len(expression_tokens | sota_tokens), 1)
-            max_overlap = max(max_overlap, overlap)
-        return round(max_overlap, 4)
+            pearson = group["factor_left"].corr(group["factor_right"], method="pearson")
+            spearman = group["factor_left"].corr(group["factor_right"], method="spearman")
+            if pd.notna(pearson):
+                pearson_values.append(float(pearson))
+            if pd.notna(spearman):
+                spearman_values.append(float(spearman))
+
+        daily_metrics = [abs(sum(values) / len(values)) for values in (pearson_values, spearman_values) if values]
+        if daily_metrics:
+            return max(daily_metrics)
+
+        overall_pearson = merged["factor_left"].corr(merged["factor_right"], method="pearson")
+        overall_spearman = merged["factor_left"].corr(merged["factor_right"], method="spearman")
+        fallback_metrics = [abs(float(value)) for value in (overall_pearson, overall_spearman) if pd.notna(value)]
+        return max(fallback_metrics, default=0.0)
+
+    @classmethod
+    def _sanitize_payload(cls, payload: Any) -> Any:
+        if isinstance(payload, dict):
+            sanitized: dict[str, Any] = {}
+            for key, value in payload.items():
+                if key.startswith("_"):
+                    continue
+                if key == "factor_snapshot":
+                    continue
+                sanitized[key] = cls._sanitize_payload(value)
+            return sanitized
+        if isinstance(payload, list):
+            return [cls._sanitize_payload(item) for item in payload]
+        return payload
 
     def _build_continue_request(
         self,

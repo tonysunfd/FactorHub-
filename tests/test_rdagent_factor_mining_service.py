@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pandas as pd
+
 from backend.services.expression_schema import FactorEvaluationResult
 from backend.services.rdagent_factor_mining_service import (
     RDAgentFactorMiningService,
@@ -9,7 +11,14 @@ from backend.services.rdagent_factor_mining_service import (
 )
 
 
-def _build_evaluation(expression: str, score: float, rank_ic: float, annual_return: float) -> FactorEvaluationResult:
+def _build_evaluation(
+    expression: str,
+    score: float,
+    rank_ic: float,
+    annual_return: float,
+    *,
+    factor_snapshot: list[dict[str, object]] | None = None,
+) -> FactorEvaluationResult:
     return FactorEvaluationResult(
         expression=expression,
         raw_expression=expression,
@@ -35,7 +44,8 @@ def _build_evaluation(expression: str, score: float, rank_ic: float, annual_retu
         interpretation={"weaknesses": [], "next_steps": ["继续优化"]},
         diagnostics=[],
         report_url="/api/mining/reports/test-report.html",
-        execution_meta={},
+        execution_meta={"factor_snapshot": factor_snapshot or []},
+        factor_series=pd.Series(dtype=float),
     )
 
 
@@ -489,3 +499,94 @@ def test_rdagent_collects_global_top_factors_across_rounds(monkeypatch) -> None:
     assert top_scores == sorted(top_scores, reverse=True)
     assert len(result["top_factors"]) <= 5
     assert result["final_round_result"]["factors"] == result["top_factors"]
+
+
+def test_rdagent_estimates_sota_correlation_from_factor_values() -> None:
+    candidate = {
+        "expression": "rank(ts_delta(close, 5))",
+        "execution_meta": {
+            "factor_snapshot": [
+                {"date": "2024-01-02", "stock_code": "AAA", "factor": 1.0},
+                {"date": "2024-01-02", "stock_code": "BBB", "factor": 2.0},
+                {"date": "2024-01-03", "stock_code": "AAA", "factor": 3.0},
+                {"date": "2024-01-03", "stock_code": "BBB", "factor": 4.0},
+            ]
+        },
+    }
+    sota_candidates = [
+        {
+            "expression": "completely_different_expression(volume)",
+            "factor_snapshot": [
+                {"date": "2024-01-02", "stock_code": "AAA", "factor": 10.0},
+                {"date": "2024-01-02", "stock_code": "BBB", "factor": 20.0},
+                {"date": "2024-01-03", "stock_code": "AAA", "factor": 30.0},
+                {"date": "2024-01-03", "stock_code": "BBB", "factor": 40.0},
+            ],
+        }
+    ]
+
+    correlation = RDAgentFactorMiningService._estimate_sota_correlation(candidate, sota_candidates)
+
+    assert correlation == 1.0
+
+
+def test_rdagent_acceptance_policy_uses_real_sota_correlation() -> None:
+    service = RDAgentFactorMiningService(auto_mining_service=_FakeAutoMiningService())
+    aligned_snapshot = [
+        {"date": "2024-01-02", "stock_code": "AAA", "factor": 1.0},
+        {"date": "2024-01-02", "stock_code": "BBB", "factor": 2.0},
+        {"date": "2024-01-03", "stock_code": "AAA", "factor": 3.0},
+        {"date": "2024-01-03", "stock_code": "BBB", "factor": 4.0},
+    ]
+    candidate = service._format_candidate_payload(
+        evaluation=_build_evaluation(
+            "rank(ts_delta(close, 5))",
+            86.0,
+            0.08,
+            0.18,
+            factor_snapshot=aligned_snapshot,
+        ),
+        coded_item={"candidate_id": "candidate-1", "raw_expression": "rank(ts_delta(close, 5))"},
+        hypothesis={"statement": "测试真实相关性"},
+        iteration=1,
+        index=0,
+        acceptance_policy={"max_correlation_with_sota": 0.5},
+    )
+    policy = {
+        "max_correlation_with_sota": 0.5,
+        "_sota_candidates": [
+            {
+                "expression": "totally_different_formula(volume)",
+                "factor_snapshot": aligned_snapshot,
+            }
+        ],
+    }
+
+    service._apply_acceptance_policy(candidate, policy, 0)
+
+    assert candidate["status"] == "watchlist"
+    assert candidate["task_details"]["rdagent"]["candidate_score"]["max_correlation_with_sota"] == 1.0
+    assert any("max_correlation_with_sota 1.0000 高于阈值 0.5000" in reason for reason in candidate["policy_diagnostics"]["failure_reasons"])
+
+
+def test_rdagent_result_payload_strips_runtime_factor_frame() -> None:
+    service = RDAgentFactorMiningService(auto_mining_service=_FakeAutoMiningService())
+    result = service.run(
+        task_id="rdagent-test",
+        config=RDAgentMiningConfig(
+            task_id="rdagent-test",
+            objective="提升综合分数",
+            max_iterations=1,
+            candidates_per_iteration=1,
+            base_factors=["AlphaSeed"],
+            candidate_universe=["close", "volume"],
+            start_date="2024-01-01",
+            end_date="2024-03-31",
+            universe="hs300",
+            benchmark="000300.SH",
+            acceptance_policy={},
+        ),
+    )
+
+    assert "_factor_frame" not in result["top_factors"][0]
+    assert "factor_snapshot" not in result["sota_candidates"][0]

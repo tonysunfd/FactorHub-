@@ -38,3 +38,4 @@ class FactorEvaluationResult:
     diagnostics: list[dict[str, Any]]
     report_url: str | None
     execution_meta: dict[str, Any] = field(default_factory=dict)
+    factor_series: pd.Series | None = None
