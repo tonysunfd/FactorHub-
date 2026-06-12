@@ -170,6 +170,7 @@ class RDAgentMiningRequest(BaseModel):
     continuation_of: Optional[str] = None
     previous_feedback_id: Optional[str] = None
     previous_expressions: list[str] = []
+    previous_sota_expressions: list[str] = []
     acceptance_policy: RDAgentAcceptancePolicy = RDAgentAcceptancePolicy()
 
 
@@ -326,7 +327,7 @@ def _build_rdagent_round_from_service(round_item: dict[str, Any], task_id: str) 
         "best_score": evaluation.get("best_score", 0.0),
         "avg_score": evaluation.get("avg_score", 0.0),
         "input_base_factors": list(experiment.get("base_factors") or hypothesis.get("base_factors") or []),
-        "selected_factors": list(experiment.get("base_factors") or hypothesis.get("base_factors") or []),
+        "selected_factors": list((round_item.get("continuation_selection") or {}).get("selected_factors") or experiment.get("base_factors") or hypothesis.get("base_factors") or []),
         "factor_update_mode": "append",
         "hypothesis": {
             "statement": hypothesis.get("statement") or hypothesis.get("summary") or hypothesis.get("hypothesis"),
@@ -354,7 +355,8 @@ def _build_rdagent_round_from_service(round_item: dict[str, Any], task_id: str) 
         "continuation_hypothesis": {
             "hypothesis": hypothesis.get("statement") or hypothesis.get("summary"),
             "target_goal": hypothesis.get("research_direction") or hypothesis.get("target_goal"),
-            "candidate_factors": list(experiment.get("base_factors") or []),
+            "candidate_factors": list((round_item.get("continuation_selection") or {}).get("selected_factors") or experiment.get("base_factors") or []),
+            "selected_for_next_round": list((round_item.get("next_base_factors") or [])),
         },
         "continuation_feedback": {
             "reason": feedback.get("reason") or feedback.get("summary"),
@@ -418,6 +420,7 @@ async def _run_rdagent_mining(task_id: str, request: RDAgentMiningRequest) -> No
             continuation_of=request.continuation_of,
             previous_feedback_id=request.previous_feedback_id,
             previous_expressions=list(request.previous_expressions or []),
+            previous_sota_expressions=list(request.previous_sota_expressions or []),
             cancel_check=lambda: _raise_if_rdagent_task_cancel_requested(task_id),
         )
         service = RDAgentFactorMiningService()
@@ -482,6 +485,7 @@ async def _run_rdagent_mining(task_id: str, request: RDAgentMiningRequest) -> No
             "objective": request.objective,
             "rounds": rounds,
             "retained_factors": retained_factors,
+            "top_factors": list(result.get("top_factors") or []),
             "watchlist_factors": list(result.get("watchlist_factors") or []),
             "fitness_history": normalize_fitness_history(result.get("fitness_history")),
             "final_round_result": {

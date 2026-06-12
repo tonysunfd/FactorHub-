@@ -64,6 +64,7 @@ class RDAgentMiningConfig:
     continuation_of: str | None = None
     previous_feedback_id: str | None = None
     previous_expressions: list[str] = field(default_factory=list)
+    previous_sota_expressions: list[str] = field(default_factory=list)
     cancel_check: Callable[[], None] | None = None
 
 
@@ -89,6 +90,14 @@ class RDAgentFactorMiningService:
         rounds: list[dict[str, Any]] = []
         retained_factors: list[dict[str, Any]] = []
         watchlist_factors: list[dict[str, Any]] = []
+        sota_candidates: list[dict[str, Any]] = [
+            {
+                "name": f"Historical_SOTA_{index + 1}",
+                "expression": expression,
+                "score": 0.0,
+            }
+            for index, expression in enumerate(_dedupe_strings(list(config.previous_sota_expressions or [])))
+        ]
         fitness_history: dict[str, list[float]] = {"best": [], "average": []}
         known_expressions = list(config.previous_expressions or [])
 
@@ -143,6 +152,7 @@ class RDAgentFactorMiningService:
                 hypothesis=hypothesis,
                 rounds=rounds,
                 iteration=iteration,
+                sota_candidates=sota_candidates,
             )
             candidates = list(run_result.get("candidates") or [])
             evaluation = {
@@ -187,6 +197,21 @@ class RDAgentFactorMiningService:
                 },
             )
 
+            continuation_selection = None
+            next_base_factors = list(experiment.get("base_factors") or current_base_factors)
+            if iteration < total_iterations:
+                continuation_selection = self._select_next_base_factors(
+                    config=config,
+                    current_base_factors=current_base_factors,
+                    hypothesis=hypothesis,
+                    run_result=run_result,
+                )
+                selected_for_next_round = list((continuation_selection or {}).get("selected_factors") or [])
+                if selected_for_next_round:
+                    next_base_factors = _dedupe_strings(list(next_base_factors) + selected_for_next_round)
+
+            updated_sota_candidates = self._merge_sota_candidates(sota_candidates, candidates)
+
             round_item = {
                 "round_index": iteration,
                 "hypothesis": hypothesis,
@@ -196,11 +221,15 @@ class RDAgentFactorMiningService:
                 "all_factors": candidates,
                 "evaluation": evaluation,
                 "feedback": feedback,
+                "continuation_selection": continuation_selection,
+                "next_base_factors": list(next_base_factors),
+                "sota_candidates": list(updated_sota_candidates),
             }
             rounds.append(round_item)
 
             retained_factors.extend([item for item in candidates if item.get("status") == "accepted"])
             watchlist_factors.extend([item for item in candidates if item.get("status") == "watchlist"])
+            sota_candidates = updated_sota_candidates
             fitness_history["best"].append(evaluation["best_score"])
             fitness_history["average"].append(evaluation["avg_score"])
 
@@ -209,19 +238,13 @@ class RDAgentFactorMiningService:
                 if expression:
                     known_expressions.append(expression)
 
-            next_base_factors = list(experiment.get("base_factors") or current_base_factors)
-            if candidates:
-                next_base_factors.extend(
-                    candidate.get("name")
-                    for candidate in candidates
-                    if candidate.get("status") == "accepted" and candidate.get("name")
-                )
             current_base_factors = _dedupe_strings(next_base_factors)
 
         final_round = rounds[-1] if rounds else {}
+        top_factors = self._collect_top_factors(rounds, limit=5)
         final_round_result = {
             **(final_round.get("evaluation") or {}),
-            "factors": final_round.get("candidates") or [],
+            "factors": top_factors or final_round.get("candidates") or [],
         }
         return {
             "task_id": task_id,
@@ -229,6 +252,8 @@ class RDAgentFactorMiningService:
             "rounds": rounds,
             "retained_factors": retained_factors,
             "watchlist_factors": watchlist_factors,
+            "top_factors": top_factors,
+            "sota_candidates": sota_candidates,
             "fitness_history": fitness_history,
             "final_round_result": final_round_result,
             "continue_mining_request": self._build_continue_request(
@@ -237,6 +262,50 @@ class RDAgentFactorMiningService:
                 known_expressions=known_expressions,
             ),
         }
+
+    def _select_next_base_factors(
+        self,
+        *,
+        config: RDAgentMiningConfig,
+        current_base_factors: list[str],
+        hypothesis: dict[str, Any],
+        run_result: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        round_evaluation = {
+            "base_factors": list(current_base_factors),
+            "primary_problem": hypothesis.get("reason"),
+            "recommended_goal": hypothesis.get("research_direction") or config.direction or "score",
+            "suggested_actions": [hypothesis.get("expected_signal")] if hypothesis.get("expected_signal") else [],
+            "metric_snapshot": run_result.get("metrics") or {},
+        }
+        parent_result = {
+            "factors": list(run_result.get("candidates") or []),
+            "best_score": (run_result.get("metrics") or {}).get("score"),
+            "avg_score": (run_result.get("metrics") or {}).get("avg_score"),
+            "round_evaluation": round_evaluation,
+        }
+        parent_request = {
+            "base_factors": list(current_base_factors),
+            "direction": hypothesis.get("research_direction") or config.direction or "score",
+            "start_date": config.start_date,
+            "end_date": config.end_date,
+            "universe": config.universe,
+            "benchmark": config.benchmark,
+        }
+        try:
+            return self._auto_mining_service.select_continue_factors(
+                parent_result=parent_result,
+                parent_request=parent_request,
+                prompt=config.objective,
+                direction=hypothesis.get("research_direction") or config.direction,
+                factor_update_mode="append",
+                max_factor_count=max(int(config.candidates_per_iteration or 1), 1),
+                candidate_limit=40,
+                current_base_factors=list(current_base_factors),
+            )
+        except Exception as exc:
+            logger.warning("RDAgent 选择下一轮基础因子失败，保留当前基础因子：%s", exc)
+            return None
 
     def _propose_hypothesis(
         self,
@@ -298,6 +367,10 @@ class RDAgentFactorMiningService:
             "candidate_limit": max(int(config.candidates_per_iteration or 1), 1),
             "base_factors": base_factors,
             "candidate_universe": list(config.candidate_universe),
+            "sota_expressions": [
+                str(item.get("expression") or "").strip()
+                for item in (rounds[-1].get("sota_candidates") or [])
+            ] if rounds else [],
             "hypothesis_summary": hypothesis.get("statement"),
             "evaluation_focus": hypothesis.get("expected_signal"),
             "factor_formulations": factor_formulations,
@@ -351,6 +424,7 @@ class RDAgentFactorMiningService:
         hypothesis: dict[str, Any],
         rounds: list[dict[str, Any]],
         iteration: int,
+        sota_candidates: list[dict[str, Any]],
     ) -> dict[str, Any]:
         stock_codes = self._auto_mining_service.data_service.get_stock_universe(config.universe, date=config.start_date)[:30]
         if not stock_codes:
@@ -391,6 +465,7 @@ class RDAgentFactorMiningService:
 
         candidates.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
         policy = dict(config.acceptance_policy or {})
+        policy["_sota_candidates"] = list(sota_candidates)
         for rank, candidate in enumerate(candidates):
             self._apply_acceptance_policy(candidate, policy, rank)
 
@@ -450,6 +525,10 @@ class RDAgentFactorMiningService:
         current_base_factors: list[str],
         known_expressions: list[str],
     ) -> list[str]:
+        sota_expressions = [
+            str(item.get("expression") or "").strip()
+            for item in (rounds[-1].get("sota_candidates") or [])
+        ] if rounds else []
         llm_response = self._call_llm_json(
             system_prompt=_RDAGENT_EXPERIMENT_SYSTEM_PROMPT,
             user_prompt=self._build_experiment_prompt(
@@ -459,6 +538,7 @@ class RDAgentFactorMiningService:
                 iteration=iteration,
                 current_base_factors=current_base_factors,
                 known_expressions=known_expressions,
+                sota_expressions=sota_expressions,
             ),
         )
         values = llm_response.get("factor_formulations") or llm_response.get("expressions") or []
@@ -535,6 +615,7 @@ class RDAgentFactorMiningService:
         iteration: int,
         current_base_factors: list[str],
         known_expressions: list[str],
+        sota_expressions: list[str],
     ) -> str:
         acceptance_policy = self._serialize_acceptance_policy(config.acceptance_policy)
         return (
@@ -553,6 +634,7 @@ class RDAgentFactorMiningService:
             f"候选字段：{json.dumps(config.candidate_universe, ensure_ascii=False)}\n"
             f"验收阈值：{json.dumps(acceptance_policy, ensure_ascii=False)}\n"
             f"历史表达式（禁止重复）：{json.dumps(known_expressions[-20:], ensure_ascii=False)}\n"
+            f"当前 SOTA 候选表达式：{json.dumps(sota_expressions[-10:], ensure_ascii=False)}\n"
             f"表达式契约：{rdagent_expression_contract_text()}\n"
             f"需要生成 {max(int(config.candidates_per_iteration or 1), 1)} 条候选表达式。"
             "请只生成在当前候选字段范围内、且有机会满足验收阈值的表达式。"
@@ -723,19 +805,62 @@ class RDAgentFactorMiningService:
             reasons.append(f"valid_coverage {coverage:.4f} 低于阈值 {coverage_floor:.4f}")
 
         max_corr = _safe_float(policy.get("max_correlation_with_sota"), 0.99)
-        correlation = 0.0
+        correlation = self._estimate_sota_correlation(candidate, policy.get("_sota_candidates") or [])
         if correlation > max_corr:
             reasons.append(f"max_correlation_with_sota {correlation:.4f} 高于阈值 {max_corr:.4f}")
 
-        status = "accepted" if not reasons and rank == 0 else "watchlist"
-        if reasons and rank > 0:
-            status = "rejected"
+        status = "accepted" if not reasons else "watchlist"
         candidate["status"] = status
         rdagent_details = candidate.setdefault("task_details", {}).setdefault("rdagent", {})
         rdagent_details["policy_failure_reasons"] = reasons
         candidate["policy_diagnostics"] = {"failure_reasons": reasons}
         candidate["task_details"]["rdagent"]["candidate_score"]["valid_coverage"] = coverage
         candidate["task_details"]["rdagent"]["candidate_score"]["max_correlation_with_sota"] = correlation
+
+    @staticmethod
+    def _merge_sota_candidates(existing: list[dict[str, Any]], candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        merged = list(existing)
+        seen = {_normalize_expression_key(str(item.get("expression") or "")) for item in merged if str(item.get("expression") or "").strip()}
+        for candidate in sorted(candidates, key=lambda item: float(item.get("score") or 0.0), reverse=True):
+            if candidate.get("status") != "accepted":
+                continue
+            expression = str(candidate.get("expression") or "").strip()
+            if not expression:
+                continue
+            key = _normalize_expression_key(expression)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(
+                {
+                    "name": candidate.get("name"),
+                    "expression": expression,
+                    "score": float(candidate.get("score") or 0.0),
+                }
+            )
+        merged.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
+        return merged[:20]
+
+    @staticmethod
+    def _estimate_sota_correlation(candidate: dict[str, Any], sota_candidates: list[dict[str, Any]]) -> float:
+        expression = str(candidate.get("expression") or "").strip()
+        if not expression or not isinstance(sota_candidates, list):
+            return 0.0
+        expression_tokens = set(_tokenize_expression(expression))
+        if not expression_tokens:
+            return 0.0
+
+        max_overlap = 0.0
+        for sota_candidate in sota_candidates:
+            sota_expression = str((sota_candidate or {}).get("expression") or "").strip()
+            if not sota_expression:
+                continue
+            sota_tokens = set(_tokenize_expression(sota_expression))
+            if not sota_tokens:
+                continue
+            overlap = len(expression_tokens & sota_tokens) / max(len(expression_tokens | sota_tokens), 1)
+            max_overlap = max(max_overlap, overlap)
+        return round(max_overlap, 4)
 
     def _build_continue_request(
         self,
@@ -754,8 +879,8 @@ class RDAgentFactorMiningService:
             "end_date": config.end_date,
             "universe": config.universe,
             "benchmark": config.benchmark,
-            "max_iterations": config.max_iterations,
-            "candidates_per_iteration": config.candidates_per_iteration,
+            "max_iterations": max(2, int(config.max_iterations or 1)),
+            "candidates_per_iteration": max(2, int(config.candidates_per_iteration or 1)),
             "n_groups": config.n_groups,
             "holding_period": config.holding_period,
             "direction": feedback.get("next_hypothesis") and config.direction or config.direction,
@@ -764,6 +889,11 @@ class RDAgentFactorMiningService:
             "continuation_of": config.task_id,
             "previous_feedback_id": config.previous_feedback_id or f"{config.task_id}-feedback-{final_round.get('round_index', 0)}",
             "previous_expressions": _dedupe_strings(known_expressions),
+            "previous_sota_expressions": [
+                str(item.get("expression") or "").strip()
+                for item in (final_round.get("sota_candidates") or [])
+                if str(item.get("expression") or "").strip()
+            ],
             "acceptance_policy": dict(config.acceptance_policy or {}),
         }
         return {
@@ -771,6 +901,23 @@ class RDAgentFactorMiningService:
             "summary": feedback.get("reason") or "根据上一轮反馈继续优化。",
             "payload": payload,
         }
+
+    @staticmethod
+    def _collect_top_factors(rounds: list[dict[str, Any]], limit: int = 5) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for round_item in rounds:
+            for candidate in list(round_item.get("candidates") or round_item.get("all_factors") or []):
+                expression = str(candidate.get("expression") or "").strip()
+                if not expression:
+                    continue
+                key = _normalize_expression_key(expression)
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(candidate)
+        merged.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
+        return merged[: max(int(limit or 0), 0)]
 
     @staticmethod
     def _raise_if_cancelled(config: RDAgentMiningConfig) -> None:
@@ -808,3 +955,24 @@ def _dedupe_strings(values: list[str]) -> list[str]:
         seen.add(key)
         result.append(text)
     return result
+
+
+def _normalize_expression_key(expression: str) -> str:
+    return "".join(ch.lower() for ch in expression if not ch.isspace())
+
+
+def _tokenize_expression(expression: str) -> list[str]:
+    normalized = _normalize_expression_key(expression)
+    token = []
+    tokens: list[str] = []
+    for ch in normalized:
+        if ch.isalnum() or ch == "_":
+            token.append(ch)
+            continue
+        if token:
+            tokens.append("".join(token))
+            token.clear()
+        tokens.append(ch)
+    if token:
+        tokens.append("".join(token))
+    return tokens

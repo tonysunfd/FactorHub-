@@ -3,6 +3,10 @@ export type FitnessHistory = {
   average: number[];
 };
 
+export type ExtendedFitnessHistory = FitnessHistory & {
+  running_best?: number[];
+};
+
 type ProgressLikeStatus = {
   fitness_history?: FitnessHistory | null;
   current_generation?: number | null;
@@ -44,4 +48,17 @@ export const buildProgressHistory = (status?: ProgressLikeStatus | null): Fitnes
     return normalized;
   }
   return buildProgressFallbackHistory(status);
+};
+
+export const buildRunningBestHistory = (history?: FitnessHistory | null): ExtendedFitnessHistory => {
+  const normalized = normalizeFitnessHistory(history);
+  let bestSoFar = Number.NEGATIVE_INFINITY;
+  const runningBest = normalized.best.map((value) => {
+    bestSoFar = Math.max(bestSoFar, Number(value || 0));
+    return bestSoFar;
+  });
+  return {
+    ...normalized,
+    running_best: runningBest,
+  };
 };

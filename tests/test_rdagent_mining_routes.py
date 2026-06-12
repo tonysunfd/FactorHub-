@@ -70,6 +70,8 @@ def test_rdagent_start_status_results_and_tasks(monkeypatch) -> None:
                 "hypothesis": {"statement": "量价共振因子可提升综合分数"},
                 "feedback": {"observations": "本轮有 1 个候选通过筛选", "hypothesis_evaluation": "supported"},
                 "evaluation": {"best_score": 81.0, "avg_score": 74.0},
+                "continuation_selection": {"selected_factors": ["AlphaContinue"]},
+                "next_base_factors": ["Alpha1", "AlphaContinue"],
                 "candidates": [{"name": "Candidate_1", "expression": "rank(close)", "status": "accepted"}],
                 "all_factors": [{"name": "Candidate_1", "expression": "rank(close)", "status": "accepted"}],
             }
@@ -77,11 +79,23 @@ def test_rdagent_start_status_results_and_tasks(monkeypatch) -> None:
         mining.rdagent_tasks[task_id]["latest_round"] = mining.rdagent_tasks[task_id]["rounds"][0]
         mining.rdagent_tasks[task_id]["result"] = {
             "task_id": task_id,
-            "rounds": mining.rdagent_tasks[task_id]["rounds"],
+            "rounds": [
+                {
+                    **mining.rdagent_tasks[task_id]["rounds"][0],
+                    "continuation_hypothesis": {
+                        "selected_for_next_round": ["Alpha1", "AlphaContinue"],
+                    },
+                }
+            ],
             "retained_factors": mining.rdagent_tasks[task_id]["candidates"],
             "fitness_history": mining.rdagent_tasks[task_id]["fitness_history"],
             "final_round_result": {"factors": mining.rdagent_tasks[task_id]["candidates"]},
-            "continue_mining_request": {"objective": "继续优化量价共振因子"},
+            "continue_mining_request": {
+                "objective": "继续优化量价共振因子",
+                "payload": {
+                    "previous_sota_expressions": ["rank(close)"],
+                },
+            },
         }
 
     created_tasks: list[asyncio.Task] = []
@@ -122,6 +136,8 @@ def test_rdagent_start_status_results_and_tasks(monkeypatch) -> None:
         assert status["data"]["request"]["candidate_universe"] == ["close", "volume"]
         assert result["data"]["final_round_result"]["factors"][0]["expression"] == "rank(close)"
         assert result["data"]["continue_mining_request"]["objective"] == "继续优化量价共振因子"
+        assert result["data"]["continue_mining_request"]["payload"]["previous_sota_expressions"] == ["rank(close)"]
+        assert result["data"]["rounds"][0]["continuation_hypothesis"]["selected_for_next_round"] == ["Alpha1", "AlphaContinue"]
         assert tasks["data"][0]["task_id"] == task_id
         assert tasks["data"][0]["kind"] == "rdagent"
 

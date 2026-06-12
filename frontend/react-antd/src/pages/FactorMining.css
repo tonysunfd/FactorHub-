@@ -1059,6 +1059,38 @@
   gap: 16px;
 }
 
+.factor-mining-container .rdagent-result-board {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-bottom: 20px;
+}
+
+.factor-mining-container .rdagent-result-board-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 16px 18px;
+  border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: #f8fafc;
+}
+
+.factor-mining-container .rdagent-result-board-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr);
+  gap: 14px;
+}
+
+.factor-mining-container .rdagent-result-board-panel {
+  min-width: 0;
+  padding: 16px;
+  border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: #fff;
+}
+
 .factor-mining-container .rdagent-manual-report-card .ant-space,
 .factor-mining-container .rdagent-manual-report-card .ant-space-item,
 .factor-mining-container .rdagent-manual-report-card .ant-tag,
@@ -1288,7 +1320,8 @@
   .factor-mining-container .rdagent-loop-overview,
   .factor-mining-container .rdagent-overview-metrics,
   .factor-mining-container .rdagent-round-digest-grid,
-  .factor-mining-container .rdagent-trace-meta-grid {
+  .factor-mining-container .rdagent-trace-meta-grid,
+  .factor-mining-container .rdagent-result-board-grid {
     grid-template-columns: 1fr;
   }
 
@@ -1303,5 +1336,9 @@
 
   .factor-mining-container .rdagent-config-collapse .ant-collapse-content-box {
     padding: 4px 14px 8px !important;
+  }
+
+  .factor-mining-container .rdagent-result-board-header {
+    flex-direction: column;
   }
 }

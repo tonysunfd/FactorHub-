@@ -38,7 +38,9 @@ import wqbrainApi from "@/services/wqbrain-api";
 import { resolveApiUrl } from "@/services/url";
 import {
   buildProgressHistory,
+  buildRunningBestHistory,
   EMPTY_FITNESS_HISTORY,
+  ExtendedFitnessHistory,
   hasFitnessHistory,
   normalizeFitnessHistory,
 } from "@/utils/miningProgress";
@@ -188,6 +190,7 @@ interface AutoCampaignStatus extends MiningStatus {
   retained_count: number;
   upstream_status?: string;
   cancel_requested?: boolean;
+  request?: Record<string, any>;
   rounds?: RDAgentTraceRound[];
   latest_round?: RDAgentTraceRound;
   manual_report?: Record<string, any>;
@@ -260,6 +263,7 @@ interface AutoCampaignRoundSummary {
 interface AutoCampaignResult {
   rounds: AutoCampaignRoundSummary[];
   retained_factors: AutoFactor[];
+  top_factors?: AutoFactor[];
   final_round_task_id?: string;
   final_round_result?: AutoMiningResult;
   latest_round_task_id?: string;
@@ -335,6 +339,12 @@ interface RDAgentLoopSnapshot {
   retainedCount: number;
   baseFactors: string[];
   candidateCount: number;
+}
+
+interface RDAgentResultBoardProps {
+  topFactors: AutoFactor[];
+  acceptedFactors: AutoFactor[];
+  rounds: RDAgentTraceRound[];
 }
 
 interface RDAgentConfigSnapshotItem {
@@ -526,6 +536,13 @@ const normalizeRDAgentResultForDashboard = (result: AutoCampaignResult | null | 
     };
   });
   const finalRound = rounds[rounds.length - 1] as any;
+  const topFactors = (
+    (result.top_factors && result.top_factors.length)
+      ? result.top_factors
+      : result.final_round_result?.factors
+        || finalRound?.candidates
+        || []
+  ) as any[];
   const retainedFactors = ((result.retained_factors && result.retained_factors.length)
     ? result.retained_factors
     : finalRound?.retained_factors
@@ -542,6 +559,16 @@ const normalizeRDAgentResultForDashboard = (result: AutoCampaignResult | null | 
     ...result,
     rounds,
     best_score: finalRoundBestScore,
+    top_factors: topFactors
+      .map((factor: any) =>
+        normalizeRDAgentFactorForDashboard(
+          factor,
+          factor?.automation_meta?.round_index ?? finalRound?.round_index,
+          factor?.automation_meta?.round_task_id || finalRound?.task_id,
+        )
+      )
+      .sort((left: any, right: any) => Number(right?.score || 0) - Number(left?.score || 0))
+      .slice(0, 5),
     retained_factors: retainedFactors.map((factor: any) =>
       normalizeRDAgentFactorForDashboard(
         factor,
@@ -770,9 +797,31 @@ const getCampaignRoundEvaluation = (result: AutoCampaignResult | null): Record<s
 const getAutoCampaignDisplayedFactors = (result: AutoCampaignResult | null | undefined): AutoFactor[] => {
   if (!result) return [];
   return (
-    result.final_round_result?.factors
+    result.top_factors
+    || result.final_round_result?.factors
     || result.latest_round_result?.factors
     || result.latest_round_retained_factors
+    || []
+  ) as AutoFactor[];
+};
+
+const getRDAgentDisplayedTopFactors = (result: AutoCampaignResult | null | undefined): AutoFactor[] => {
+  if (!result) return [];
+  return (
+    result.top_factors
+    || result.final_round_result?.factors
+    || result.latest_round_result?.factors
+    || result.latest_round_retained_factors
+    || []
+  ) as AutoFactor[];
+};
+
+const getRDAgentAcceptedFactors = (result: AutoCampaignResult | null | undefined): AutoFactor[] => {
+  if (!result) return [];
+  return (
+    result.retained_factors
+    || result.final_round_result?.factors
+    || result.rounds?.flatMap((round) => round.retained_factors || [])
     || []
   ) as AutoFactor[];
 };
@@ -1439,7 +1488,7 @@ const FactorMining: React.FC = () => {
 
   const updateChart = (
     target: "progress" | "result",
-    fitnessHistory?: { best: number[]; average: number[] },
+    fitnessHistory?: ExtendedFitnessHistory,
     title?: string,
     yName?: string,
   ) => {
@@ -1462,19 +1511,31 @@ const FactorMining: React.FC = () => {
       else resultChartInstanceRef.current = chart;
     }
 
-    const generations = fitnessHistory.best.map((_, i) => i + 1);
+    const normalizedHistory = buildRunningBestHistory(fitnessHistory);
+    const generations = normalizedHistory.best.map((_, i) => i + 1);
+    const series = [
+      { name: "当前轮最优", type: "line", data: normalizedHistory.best, smooth: true, itemStyle: { color: "#3b82f6" } },
+      { name: "当前轮平均", type: "line", data: normalizedHistory.average, smooth: true, itemStyle: { color: "#22c55e" } },
+    ];
+    if (normalizedHistory.running_best?.length) {
+      series.push({
+        name: "累计历史最优",
+        type: "line",
+        data: normalizedHistory.running_best,
+        smooth: true,
+        lineStyle: { type: "dashed", width: 2, color: "#f59e0b" },
+        itemStyle: { color: "#f59e0b" },
+      } as any);
+    }
     chart.setOption(
       {
         title: { text: title || "进化曲线", left: "center", textStyle: { fontSize: 16, fontWeight: 600 } },
         tooltip: { trigger: "axis" },
-        legend: { data: ["最优值", "平均值"], bottom: 0 },
+        legend: { data: series.map((item: any) => item.name), bottom: 0 },
         grid: { left: "3%", right: "4%", bottom: "10%", containLabel: true },
         xAxis: { type: "category", name: "轮次", data: generations },
         yAxis: { type: "value", name: yName || "分数", scale: true },
-        series: [
-          { name: "最优值", type: "line", data: fitnessHistory.best, smooth: true, itemStyle: { color: "#3b82f6" } },
-          { name: "平均值", type: "line", data: fitnessHistory.average, smooth: true, itemStyle: { color: "#22c55e" } },
-        ],
+        series,
       },
       true,
     );
@@ -2860,6 +2921,9 @@ const FactorMining: React.FC = () => {
     elapsedSeconds?: number;
   }): RDAgentOverviewMetric[] => {
     const { status, result, elapsedSeconds = 0 } = options;
+    const submittedRequest = status?.request || {};
+    const submittedLoops = Number(submittedRequest.max_iterations || 0);
+    const submittedCandidates = Number(submittedRequest.candidates_per_iteration || 0);
     if (result) {
       const rounds = result.rounds || [];
       const finalRound = rounds[rounds.length - 1];
@@ -2879,6 +2943,12 @@ const FactorMining: React.FC = () => {
         {
           label: "保留候选",
           value: `${retainedCount} 个`,
+        },
+        {
+          label: "实际提交预算",
+          value: submittedLoops > 0 && submittedCandidates > 0
+            ? `${submittedLoops} 轮 / 每轮 ${submittedCandidates} 个`
+            : "结果未记录请求预算",
         },
         {
           label: "研究耗时",
@@ -2905,6 +2975,12 @@ const FactorMining: React.FC = () => {
       {
         label: "累计保留",
         value: `${status?.retained_count || 0} 个`,
+      },
+      {
+        label: "实际提交预算",
+        value: submittedLoops > 0 && submittedCandidates > 0
+          ? `${submittedLoops} 轮 / 每轮 ${submittedCandidates} 个`
+          : "等待请求入库",
       },
     ];
   };
@@ -3223,6 +3299,84 @@ const FactorMining: React.FC = () => {
           <div className="rdagent-round-digest-card">
             <div className="rdagent-round-digest-label">Feedback</div>
             <div className="rdagent-round-digest-text">{feedback.observations || nextHypothesis || "暂无反馈摘要"}</div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderRDAgentResultBoard = ({ topFactors, acceptedFactors, rounds }: RDAgentResultBoardProps) => {
+    const acceptedCount = acceptedFactors.length;
+    const roundCount = rounds.length;
+    return (
+      <div className="rdagent-result-board">
+        <div className="rdagent-result-board-header">
+          <div>
+            <div className="rdagent-round-digest-kicker">结果视角</div>
+            <h4 className="chart-title" style={{ marginBottom: 6 }}>Top 5 高分因子 vs. 入选候选</h4>
+            <div className="rdagent-round-digest-copy">
+              页面里“保留候选”表示通过阈值筛选；“Top 5 高分因子”表示跨所有轮次按分数排序的最高分榜单，两者不是同一个概念。
+            </div>
+          </div>
+          <Space wrap>
+            <Tag color="blue">Top {topFactors.length}</Tag>
+            <Tag color="green">Accepted {acceptedCount}</Tag>
+            <Tag color="purple">轮次 {roundCount}</Tag>
+          </Space>
+        </div>
+        <div className="rdagent-result-board-grid">
+          <div className="rdagent-result-board-panel">
+            <div className="rdagent-trace-label">Top 5 最高分因子</div>
+            <div className="rdagent-candidate-grid">
+              {topFactors.map((factor, index) => {
+                const score = factor.task_details?.rdagent?.candidate_score || {};
+                const correlationDisplay = getRDAgentCorrelationDisplay(score.max_correlation_with_sota);
+                return (
+                  <div key={`${factor.candidate_id || factor.name}-top-${index}`} className={`rdagent-candidate rdagent-candidate-${factor.status || "computed"}`}>
+                    <div className="rdagent-candidate-top">
+                      <span className="rdagent-candidate-name">#{index + 1} {factor.name || `Factor ${index + 1}`}</span>
+                      <Space wrap size={6}>
+                        <Tag color="blue">Score {Number(factor.score || 0).toFixed(1)}</Tag>
+                        <Tag color={factor.status === "accepted" ? "green" : "default"}>{factor.status || "computed"}</Tag>
+                        {!correlationDisplay.placeholder ? <Tag color={correlationDisplay.color}>{correlationDisplay.text}</Tag> : null}
+                      </Space>
+                    </div>
+                    <div className="factor-expression">{factor.expression}</div>
+                    <Space wrap size={[4, 8]} className="rdagent-candidate-metrics">
+                      <Tag>rankIC {Number(score.rank_ic ?? factor.rank_ic ?? 0).toFixed(3)}</Tag>
+                      <Tag>Sharpe {Number(score.sharpe ?? factor.sharpe ?? 0).toFixed(2)}</Tag>
+                      <Tag>Fitness {Number(factor.fitness ?? factor.wq_brain?.wq_fitness ?? 0).toFixed(2)}</Tag>
+                    </Space>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          <div className="rdagent-result-board-panel">
+            <div className="rdagent-trace-label">为什么有时只看到 1 个结果</div>
+            <Alert
+              type="info"
+              showIcon
+              message="之前页面优先展示的是 accepted / retained 因子"
+              description={
+                <Space direction="vertical" size={6}>
+                  <span>如果一轮里只有 1 个候选通过阈值，页面就会看起来像“只生成了 1 个结果”，即使实际上系统评估过更多候选。</span>
+                  <span>现在右侧榜单固定展示跨所有轮次分数最高的前 5 个因子，左侧统计继续保留 accepted 数量，两个视角分开看会更清楚。</span>
+                </Space>
+              }
+            />
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginTop: 12 }}
+              message="为什么优化曲线可能越来越差"
+              description={
+                <Space direction="vertical" size={6}>
+                  <span>蓝线表示“当前轮最优”，绿线表示“当前轮平均”，橙色虚线表示“累计历史最优”。</span>
+                  <span>当前轮最优下降不代表历史最优被覆盖，而是说明新一轮探索没有超过旧最佳，或者为了扩大搜索空间尝试了更激进但更弱的候选。</span>
+                </Space>
+              }
+            />
           </div>
         </div>
       </div>
@@ -4227,15 +4381,17 @@ const FactorMining: React.FC = () => {
         const latestRDAgentRound = rdagentRounds[rdagentRounds.length - 1];
         const rdagentManualReport = latestRDAgentRound?.manual_report || autoCampaignResult.manual_report;
         const rdagentContinueRequest = latestRDAgentRound?.continue_mining_request || autoCampaignResult.continue_mining_request;
+        const rdagentTopFactors = isRDAgentResult ? getRDAgentDisplayedTopFactors(autoCampaignResult) : [];
+        const rdagentAcceptedFactors = isRDAgentResult ? getRDAgentAcceptedFactors(autoCampaignResult) : [];
         const autoCampaignDisplayedFactors = isRDAgentResult
-          ? (autoCampaignResult.retained_factors || [])
+          ? rdagentTopFactors
           : getAutoCampaignDisplayedFactors(autoCampaignResult);
         const campaignRoundDetailViews = isRDAgentResult ? [] : getAutoCampaignRoundDetailViews(autoCampaignResult);
         return (
           <div className="result-shell">
             <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
               <Col xs={24} sm={8}><Card size="small"><div className="stat-label">累计最佳分数</div><div className="stat-value">{autoCampaignResult.best_score?.toFixed?.(1) || "0.0"}</div></Card></Col>
-              <Col xs={24} sm={8}><Card size="small"><div className="stat-label">保留因子数</div><div className="stat-value">{autoCampaignResult.retained_factors?.length || 0}</div></Card></Col>
+              <Col xs={24} sm={8}><Card size="small"><div className="stat-label">{isRDAgentResult ? "Top 榜单数" : "保留因子数"}</div><div className="stat-value">{isRDAgentResult ? rdagentTopFactors.length : (autoCampaignResult.retained_factors?.length || 0)}</div></Card></Col>
               <Col xs={24} sm={8}><Card size="small"><div className="stat-label">探索轮次</div><div className="stat-value">{autoCampaignResult.rounds?.length || 0}</div></Card></Col>
             </Row>
 
@@ -4256,6 +4412,7 @@ const FactorMining: React.FC = () => {
               extra={isRDAgentResult ? <Tag color="gold">Workspace</Tag> : undefined}
             >
               {isRDAgentResult ? renderRDAgentRoundDigest(latestRDAgentRound) : null}
+              {isRDAgentResult ? renderRDAgentResultBoard({ topFactors: rdagentTopFactors, acceptedFactors: rdagentAcceptedFactors, rounds: rdagentRounds }) : null}
               <div className="chart-section" style={{ marginBottom: 0 }}>
                 <h4 className="chart-title">{activeTab === "rdagent" ? "RDAgent 完整研究曲线" : "自动化完整研究曲线"}</h4>
                 <div ref={resultChartRef} className="chart-container" style={{ height: 300 }} />
