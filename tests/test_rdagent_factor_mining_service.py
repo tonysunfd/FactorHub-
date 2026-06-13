@@ -766,3 +766,134 @@ def test_rdagent_upstream_mode_reuses_reference_proposal_and_local_evaluation(mo
     assert factor["expression"] == "rank(ts_mean(volume, 10) / (ts_std(volume, 10) + 1e-6))"
     assert factor["engine_type"] == "quantgpt"
     assert factor["task_details"]["rdagent"]["candidate_score"]["score"] >= 80
+
+
+def test_rdagent_upstream_mode_converts_latex_formulation_before_local_evaluation(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "backend.services.rdagent_factor_mining_service.probe_rdagent_module_import",
+        lambda module_name: (True, None),
+    )
+    monkeypatch.setattr(
+        "backend.services.rdagent_factor_mining_service.get_rdagent_runtime_status",
+        lambda: {
+            "available": True,
+            "active_path": "/Users/tonysun/Desktop/reference/RD-Agent",
+            "python_path": "/Users/tonysun/Desktop/Factorhub V3/.venv-rdagent/bin/python",
+            "checked_paths": [],
+        },
+    )
+
+    fake_auto_service = _FakeAutoMiningService()
+    service = RDAgentFactorMiningService(auto_mining_service=fake_auto_service)
+    monkeypatch.setattr(
+        service,
+        "_generate_upstream_round_plan",
+        lambda **kwargs: {
+            "hypothesis": {
+                "statement": "短期价格动量值得验证",
+                "reason": "先验证简单动量方向。",
+                "concise_observation": "提升 Score",
+            },
+            "tasks": [
+                {
+                    "factor_name": "ShortTermMomentum",
+                    "description": "5 日价格动量",
+                    "formulation": r"F_t = \frac{C_t}{C_{t-5}} - 1",
+                    "variables": {"C_t": "close price at time t"},
+                }
+            ],
+        },
+    )
+
+    result = service.run(
+        task_id="rdagent-upstream-latex",
+        config=RDAgentMiningConfig(
+            task_id="rdagent-upstream-latex",
+            objective="提升综合分数",
+            max_iterations=1,
+            candidates_per_iteration=1,
+            base_factors=["AlphaSeed"],
+            candidate_universe=["close", "volume"],
+            start_date="2024-01-01",
+            end_date="2024-03-31",
+            universe="hs300",
+            benchmark="000300.SH",
+            acceptance_policy={},
+            execution_mode="upstream_rdagent",
+        ),
+    )
+
+    assert fake_auto_service.evaluate_expression_calls
+    assert fake_auto_service.evaluate_expression_calls[0]["expression"] == "((close) / (ts_shift(close,5))) - 1"
+    factor = result["top_factors"][0]
+    assert factor["expression"] == "((close) / (ts_shift(close,5))) - 1"
+    assert factor["engine_type"] == "quantgpt"
+
+
+def test_rdagent_upstream_mode_can_fallback_to_native_code_conversion(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "backend.services.rdagent_factor_mining_service.probe_rdagent_module_import",
+        lambda module_name: (True, None),
+    )
+    monkeypatch.setattr(
+        "backend.services.rdagent_factor_mining_service.get_rdagent_runtime_status",
+        lambda: {
+            "available": True,
+            "active_path": "/Users/tonysun/Desktop/reference/RD-Agent",
+            "python_path": "/Users/tonysun/Desktop/Factorhub V3/.venv-rdagent/bin/python",
+            "checked_paths": [],
+        },
+    )
+
+    service = RDAgentFactorMiningService(auto_mining_service=_FakeAutoMiningService())
+    monkeypatch.setattr(
+        service,
+        "_generate_upstream_round_plan",
+        lambda **kwargs: {
+            "hypothesis": {
+                "statement": "复杂公式需要函数实现",
+                "reason": "先验证函数执行链路。",
+                "concise_observation": "提升 Score",
+            },
+            "tasks": [
+                {
+                    "factor_name": "FunctionFactor",
+                    "description": "通过函数返回滚动信号",
+                    "formulation": "non_executable_formula(close, volume)",
+                    "variables": {"close": "close", "volume": "volume"},
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "_convert_formulation_to_expression_with_llm",
+        lambda formulation, variables: (
+            'def calculate_factor(df):\n'
+            '    close = pd.to_numeric(df["close"], errors="coerce")\n'
+            '    return close.pct_change(3).rolling(5, min_periods=1).mean()'
+        ),
+    )
+
+    result = service.run(
+        task_id="rdagent-upstream-function",
+        config=RDAgentMiningConfig(
+            task_id="rdagent-upstream-function",
+            objective="提升综合分数",
+            max_iterations=1,
+            candidates_per_iteration=1,
+            base_factors=["AlphaSeed"],
+            candidate_universe=["close", "volume"],
+            start_date="2024-01-01",
+            end_date="2024-03-31",
+            universe="hs300",
+            benchmark="000300.SH",
+            acceptance_policy={},
+            execution_mode="upstream_rdagent",
+        ),
+    )
+
+    factor = result["top_factors"][0]
+    assert factor["engine_type"] == "rdagent_upstream_native_code"
+    assert factor["dialect"] == "python_factor_function"
+    assert "implementation_code" in (factor.get("execution_meta") or {})

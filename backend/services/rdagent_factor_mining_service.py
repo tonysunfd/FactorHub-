@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -15,6 +16,7 @@ from backend.services.llm_config_service import llm_config_service
 from backend.services.rdagent_native_code_executor import RDAgentNativeCodeExecutor
 from backend.services.rdagent_runtime import get_rdagent_runtime_status, probe_rdagent_module_import
 from backend.services.rdagent_upstream_proposal_adapter import RDAgentUpstreamProposalAdapter
+from backend.services.research_tools.expression_adapter import ExpressionAdapter
 from backend.services.research_tools.rdagent_expression_contract import (
     RDAgentExpressionFormatError,
     normalize_rdagent_expression_for_parser,
@@ -477,6 +479,10 @@ class RDAgentFactorMiningService:
             for index, task in enumerate(upstream_tasks):
                 factor_name = str(task.get("factor_name") or f"UpstreamFactor{index + 1}").strip()
                 formulation = str(task.get("formulation") or factor_name).strip()
+                converted = self._prepare_upstream_candidate(
+                    formulation=formulation,
+                    variables=dict(task.get("variables") or {}),
+                )
                 diagnostics = [
                     {
                         "type": "info",
@@ -484,15 +490,34 @@ class RDAgentFactorMiningService:
                         "text": "候选由 reference RD-Agent proposal 生成，执行与评估仍使用 FactorHub 本地链路。",
                     }
                 ]
+                conversion_note = converted.get("conversion_note")
+                if conversion_note:
+                    diagnostics.append(
+                        {
+                            "type": "info",
+                            "label": "公式转换",
+                            "text": str(conversion_note),
+                        }
+                    )
+                if converted.get("conversion_failed"):
+                    diagnostics.append(
+                        {
+                            "type": "warning",
+                            "label": "公式转换失败",
+                            "text": "未能把 upstream formulation 转成可执行的 FactorHub 表达式或代码。",
+                        }
+                    )
                 coded_items.append(
                     {
                         "candidate_id": f"{config.task_id}-round-{iteration}-candidate-{index + 1}",
                         "raw_expression": formulation,
-                        "expression": formulation,
+                        "expression": str(converted.get("expression") or formulation),
                         "factor_name": factor_name,
                         "description": str(task.get("description") or factor_name),
                         "factor_formulation": formulation,
                         "variables": dict(task.get("variables") or {}),
+                        "implementation_code": converted.get("implementation_code"),
+                        "upstream_conversion_failed": bool(converted.get("conversion_failed")),
                         "diagnostics": diagnostics,
                     }
                 )
@@ -655,7 +680,24 @@ class RDAgentFactorMiningService:
         hypothesis: dict[str, Any],
     ) -> FactorEvaluationResult | None:
         execution_mode = str(config.execution_mode or "native_code").strip().lower()
+        if execution_mode == "upstream_rdagent" and str(coded_item.get("implementation_code") or "").strip():
+            implementation_code = str(coded_item.get("implementation_code") or "").strip()
+            return self._evaluate_native_code_candidate(
+                config=config,
+                coded_item={
+                    **coded_item,
+                    "expression": str(coded_item.get("expression") or coded_item.get("factor_name") or "RDAgentUpstreamFactor"),
+                    "raw_expression": implementation_code,
+                    "implementation_code": implementation_code,
+                },
+                stock_codes=stock_codes,
+                hypothesis=hypothesis,
+                engine_type="rdagent_upstream_native_code",
+            )
+
         if execution_mode != "native_code":
+            if coded_item.get("upstream_conversion_failed"):
+                return None
             expression = coded_item.get("expression") or ""
             return self._auto_mining_service.evaluate_expression(
                 expression=expression,
@@ -671,6 +713,23 @@ class RDAgentFactorMiningService:
                 neutralize_cap=config.neutralize_cap,
             )
 
+        return self._evaluate_native_code_candidate(
+            config=config,
+            coded_item=coded_item,
+            stock_codes=stock_codes,
+            hypothesis=hypothesis,
+            engine_type="rdagent_native_code",
+        )
+
+    def _evaluate_native_code_candidate(
+        self,
+        *,
+        config: RDAgentMiningConfig,
+        coded_item: dict[str, Any],
+        stock_codes: list[str],
+        hypothesis: dict[str, Any],
+        engine_type: str,
+    ) -> FactorEvaluationResult | None:
         implementation_code = str(coded_item.get("implementation_code") or coded_item.get("raw_expression") or "").strip()
         if not implementation_code:
             return None
@@ -697,7 +756,7 @@ class RDAgentFactorMiningService:
             direction=str(hypothesis.get("research_direction") or config.direction or "score"),
             benchmark_loader=self._auto_mining_service._load_benchmark_returns,
             report_writer=self._auto_mining_service._write_candidate_report,
-            engine_type="rdagent_native_code",
+            engine_type=engine_type,
             dialect="python_factor_function",
             canonical_expression=str(coded_item.get("expression") or "RDAgentNativeFactor"),
             canonical_ast=None,
@@ -711,6 +770,220 @@ class RDAgentFactorMiningService:
             },
         )
         return result
+
+    def _prepare_upstream_candidate(self, *, formulation: str, variables: dict[str, Any]) -> dict[str, Any]:
+        raw_formulation = str(formulation or "").strip()
+        if not raw_formulation:
+            return {"expression": "", "conversion_failed": True}
+
+        if raw_formulation.lstrip().startswith("def "):
+            return {
+                "expression": "RDAgentUpstreamFunctionFactor",
+                "implementation_code": raw_formulation,
+                "conversion_note": "upstream 直接返回了 Python 因子函数，已走本地代码执行评估。",
+            }
+
+        heuristic_expression = self._heuristic_convert_upstream_formulation(raw_formulation)
+        if heuristic_expression:
+            return {
+                "expression": heuristic_expression,
+                "conversion_note": "已将 upstream formulation 自动归一化为 FactorHub 可执行表达式。",
+            }
+
+        llm_converted = self._convert_formulation_to_expression_with_llm(raw_formulation, variables)
+        if llm_converted:
+            if llm_converted.lstrip().startswith("def "):
+                return {
+                    "expression": "RDAgentUpstreamFunctionFactor",
+                    "implementation_code": llm_converted,
+                    "conversion_note": "已通过 LLM 将 upstream formulation 转为 Python 因子函数。",
+                }
+            normalized_expression = self._normalize_candidate_expression(llm_converted)
+            if normalized_expression:
+                return {
+                    "expression": normalized_expression,
+                    "conversion_note": "已通过 LLM 将 upstream formulation 转为 FactorHub 表达式。",
+                }
+
+        return {"expression": raw_formulation, "conversion_failed": True}
+
+    def _heuristic_convert_upstream_formulation(self, formulation: str) -> str:
+        expression = str(formulation or "").strip()
+        if not expression:
+            return ""
+
+        normalized_expression = self._normalize_candidate_expression(expression)
+        if normalized_expression and self._looks_like_factorhub_expression(normalized_expression):
+            return normalized_expression
+
+        expression = re.sub(r"^\s*[A-Za-z][A-Za-z0-9_]*\s*=\s*", "", expression)
+        expression = re.sub(r"^\s*F_t\s*=\s*", "", expression, flags=re.IGNORECASE)
+        expression = expression.replace("\\\\", "\\")
+        expression = expression.replace("\\left", "").replace("\\right", "")
+        expression = expression.replace("\\cdot", "*").replace("\\times", "*")
+        expression = expression.replace("\\,", "")
+        expression = self._replace_latex_frac(expression)
+        expression = self._replace_latex_tokens(expression)
+        expression = re.sub(r"\s+", " ", expression).strip()
+
+        normalized_expression = self._normalize_candidate_expression(expression)
+        if normalized_expression and self._looks_like_factorhub_expression(normalized_expression):
+            return normalized_expression
+        return ""
+
+    def _replace_latex_frac(self, expression: str) -> str:
+        result = expression
+        while "\\frac" in result:
+            match = re.search(r"\\frac\s*\{", result)
+            if not match:
+                break
+            numerator_start = match.end() - 1
+            numerator_end = self._find_matching_brace(result, numerator_start)
+            if numerator_end == -1:
+                break
+            denominator_start = numerator_end + 1
+            while denominator_start < len(result) and result[denominator_start].isspace():
+                denominator_start += 1
+            if denominator_start >= len(result) or result[denominator_start] != "{":
+                break
+            denominator_end = self._find_matching_brace(result, denominator_start)
+            if denominator_end == -1:
+                break
+            numerator = result[numerator_start + 1:numerator_end]
+            denominator = result[denominator_start + 1:denominator_end]
+            replacement = f"(({numerator}) / ({denominator}))"
+            result = result[:match.start()] + replacement + result[denominator_end + 1:]
+        return result
+
+    @staticmethod
+    def _find_matching_brace(text: str, start: int) -> int:
+        if start < 0 or start >= len(text) or text[start] != "{":
+            return -1
+        depth = 0
+        for index in range(start, len(text)):
+            char = text[index]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return index
+        return -1
+
+    def _replace_latex_tokens(self, expression: str) -> str:
+        result = str(expression or "")
+        field_aliases = {
+            "c": "close",
+            "o": "open",
+            "h": "high",
+            "l": "low",
+            "v": "volume",
+            "amt": "amount",
+            "a": "amount",
+        }
+        for token, field in field_aliases.items():
+            result = re.sub(
+                rf"\b{token}_\{{t-(\d+)\}}",
+                lambda match, field_name=field: f"ts_shift({field_name},{match.group(1)})",
+                result,
+                flags=re.IGNORECASE,
+            )
+            result = re.sub(rf"\b{token}_t\b", field, result, flags=re.IGNORECASE)
+
+        result = result.replace("{", "(").replace("}", ")")
+        result = result.replace("^", "**")
+        return result
+
+    def _normalize_candidate_expression(self, expression: str) -> str:
+        adapted_expression = ExpressionAdapter.adapt(str(expression or "").strip())
+        normalized_expression = normalize_rdagent_expression_for_parser(adapted_expression)
+        return str(normalized_expression or "").strip()
+
+    @staticmethod
+    def _looks_like_factorhub_expression(expression: str) -> bool:
+        text = str(expression or "").strip()
+        if not text:
+            return False
+        if "\\" in text or "text(" in text.lower():
+            return False
+        if not re.search(r"\b(rank|ts_|close|open|high|low|volume|amount|returns)\b", text, flags=re.IGNORECASE):
+            return False
+
+        allowed_functions = {
+            "rank",
+            "where",
+            "abs",
+            "log",
+            "max",
+            "min",
+            "clip",
+            "zscore",
+            "sign",
+            "sqrt",
+            "power",
+            "returns",
+            "obv",
+            "sma",
+            "ma",
+            "exp",
+            "sigmoid",
+            "tanh",
+        }
+        function_names = re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", text)
+        for name in function_names:
+            lowered = name.lower()
+            if lowered.startswith("ts_"):
+                continue
+            if lowered in allowed_functions:
+                continue
+            return False
+        return True
+
+    def _convert_formulation_to_expression_with_llm(self, formulation: str, variables: dict[str, Any]) -> str | None:
+        runtime_config = llm_config_service.get_runtime_config()
+        if not str(runtime_config.get("api_key") or "").strip():
+            return None
+
+        try:
+            from backend.engines.factor_engine import _get_client, _get_model
+        except Exception:
+            return None
+
+        prompt = (
+            "你是一个量化因子公式转换助手。\n"
+            "请把下面的 RD-Agent formulation，转换成 FactorHub 可执行的表达式或 def calculate_factor(df) 函数。\n"
+            "要求：\n"
+            "1. 如果可以直接写成表达式，就只返回表达式。\n"
+            "2. 如果需要多步逻辑，就返回 def calculate_factor(df): ...\n"
+            "3. 只能使用 FactorHub 常见字段：open/high/low/close/volume/amount，以及 pandas/NumPy 常见滚动写法。\n"
+            "4. 不要输出解释，不要加代码块。\n"
+            f"formulation：{formulation}\n"
+            f"variables：{variables}\n"
+        )
+
+        try:
+            client = _get_client()
+            response = client.chat.completions.create(
+                model=_get_model(),
+                messages=[
+                    {"role": "system", "content": "你只返回可执行因子代码。"},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+                max_tokens=600,
+                timeout=60,
+            )
+            content = str((response.choices[0].message.content or "")).strip()
+        except Exception:
+            return None
+
+        if content.startswith("```"):
+            parts = content.split("```")
+            if len(parts) >= 2:
+                content = parts[1]
+                if content.startswith("python"):
+                    content = content[6:]
+        return content.strip() or None
 
     def _generate_upstream_round_plan(
         self,
