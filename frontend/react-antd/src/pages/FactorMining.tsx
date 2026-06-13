@@ -40,10 +40,10 @@ import {
   buildProgressHistory,
   buildRunningBestHistory,
   EMPTY_FITNESS_HISTORY,
-  ExtendedFitnessHistory,
   hasFitnessHistory,
   normalizeFitnessHistory,
 } from "@/utils/miningProgress";
+import type { ExtendedFitnessHistory } from "@/utils/miningProgress";
 import QuantTaskDetailsPanel from "./FactorTaskDetailsPanel";
 import "./FactorMining.css";
 
@@ -125,9 +125,14 @@ interface AutoFactor {
   name: string;
   expression: string;
   score: number;
+  candidate_id?: string;
   category?: string;
   factor_id?: number;
   grade?: string;
+  status?: string;
+  rank_ic?: number;
+  sharpe?: number;
+  fitness?: number;
   report_url?: string;
   report_metrics?: Record<string, any>;
   backtest_summary?: Record<string, any>;
@@ -326,6 +331,19 @@ interface RDAgentCorrelationDisplay {
   text: string;
   color?: string;
   placeholder: boolean;
+}
+
+interface RDAgentRuntimeStatus {
+  available: boolean;
+  active_path?: string | null;
+  python_path?: string | null;
+  checked_paths?: Array<{ path: string; exists: boolean }>;
+  importable?: boolean;
+  import_error?: string | null;
+  proposal_importable?: boolean;
+  proposal_import_error?: string | null;
+  loop_importable?: boolean;
+  loop_import_error?: string | null;
 }
 
 interface RDAgentFailureReasonDisplay {
@@ -1033,6 +1051,7 @@ const FactorMining: React.FC = () => {
   const [autoSeedState, setAutoSeedState] = useState<AutoMiningSeedState | null>(null);
   const [autoWorkflowMode, setAutoWorkflowMode] = useState<"single" | "campaign">("single");
   const [autoLaunchMode, setAutoLaunchMode] = useState<"single" | "campaign">("campaign");
+  const [rdagentRuntimeStatus, setRdagentRuntimeStatus] = useState<RDAgentRuntimeStatus | null>(null);
   const [persistedRDAgentTaskState, setPersistedRDAgentTaskState] = useState<PersistedRDAgentTaskState | null>(() =>
     loadPersistedRDAgentTaskState()
   );
@@ -1208,6 +1227,7 @@ const FactorMining: React.FC = () => {
 
     loadFactors();
     loadLLMConfig();
+    loadRDAgentRuntimeStatus();
     const endDate = dayjs();
     const startDate = dayjs().subtract(1, "year");
 
@@ -1287,6 +1307,7 @@ const FactorMining: React.FC = () => {
       n_groups: 5,
       holding_period: 5,
       direction: "score",
+      execution_mode: "native_code",
       neutralize_industry: true,
       neutralize_cap: true,
       sota_library_id: "factorhub-sota",
@@ -1339,6 +1360,7 @@ const FactorMining: React.FC = () => {
       setManualLlmSelectionSummary("");
       setAutoLlmSelectionSummary("");
       setContinueSelectionSummary("");
+      void loadRDAgentRuntimeStatus();
     }
   }, [activeTab]);
 
@@ -1977,6 +1999,50 @@ const FactorMining: React.FC = () => {
     );
   };
 
+  const loadRDAgentRuntimeStatus = async () => {
+    try {
+      const response = (await api.getRDAgentRuntimeStatus()) as any;
+      setRdagentRuntimeStatus((response?.data || null) as RDAgentRuntimeStatus | null);
+    } catch (error) {
+      console.error(error);
+      setRdagentRuntimeStatus(null);
+    }
+  };
+
+  const renderRDAgentRuntimeAlert = () => {
+    const executionMode = rdAgentForm.getFieldValue("execution_mode") || "native_code";
+    if (executionMode !== "upstream_rdagent") return null;
+    if (!rdagentRuntimeStatus) {
+      return (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="正在检查 reference RD-Agent 运行时"
+        />
+      );
+    }
+
+    const detailLines = [
+      rdagentRuntimeStatus.active_path ? `项目：${rdagentRuntimeStatus.active_path}` : "",
+      rdagentRuntimeStatus.python_path ? `Python：${rdagentRuntimeStatus.python_path}` : "",
+      `Proposal 运行时：${rdagentRuntimeStatus.proposal_importable ? "可用" : "不可用"}`,
+      rdagentRuntimeStatus.proposal_import_error ? `Proposal 错误：${rdagentRuntimeStatus.proposal_import_error}` : "",
+      `完整 upstream loop：${rdagentRuntimeStatus.loop_importable ? "可用" : "不可用"}`,
+      rdagentRuntimeStatus.loop_import_error ? `Loop 错误：${rdagentRuntimeStatus.loop_import_error}` : "",
+    ].filter(Boolean);
+
+    return (
+      <Alert
+        type={rdagentRuntimeStatus.available ? "success" : "warning"}
+        showIcon
+        style={{ marginBottom: 16, whiteSpace: "pre-wrap" }}
+        message={rdagentRuntimeStatus.available ? "reference RD-Agent proposal 运行时可用" : "reference RD-Agent proposal 运行时当前不可用"}
+        description={detailLines.join("\n\n")}
+      />
+    );
+  };
+
   const startAutoMining = async (values: any) => {
     persistAutoMiningForm({}, values);
     const [startDate, endDate] = values.dateRange;
@@ -2244,6 +2310,7 @@ const FactorMining: React.FC = () => {
         n_groups: Number(values.n_groups || 5),
         holding_period: Number(values.holding_period || 5),
         direction: values.direction,
+        execution_mode: values.execution_mode || "native_code",
         neutralize_industry: values.neutralize_industry ?? true,
         neutralize_cap: values.neutralize_cap ?? true,
         sota_library_id: values.sota_library_id || "factorhub-sota",
@@ -3083,6 +3150,13 @@ const FactorMining: React.FC = () => {
   };
 
   const getRDAgentCorrelationDisplay = (value: any): RDAgentCorrelationDisplay => {
+    if (value === null || value === undefined || value === "") {
+      return {
+        text: "Corr 未计算",
+        color: "default",
+        placeholder: true,
+      };
+    }
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) {
       return {
@@ -3353,30 +3427,35 @@ const FactorMining: React.FC = () => {
             </div>
           </div>
           <div className="rdagent-result-board-panel">
-            <div className="rdagent-trace-label">为什么有时只看到 1 个结果</div>
-            <Alert
-              type="info"
-              showIcon
-              message="之前页面优先展示的是 accepted / retained 因子"
-              description={
-                <Space direction="vertical" size={6}>
-                  <span>如果一轮里只有 1 个候选通过阈值，页面就会看起来像“只生成了 1 个结果”，即使实际上系统评估过更多候选。</span>
-                  <span>现在右侧榜单固定展示跨所有轮次分数最高的前 5 个因子，左侧统计继续保留 accepted 数量，两个视角分开看会更清楚。</span>
-                </Space>
-              }
-            />
-            <Alert
-              type="warning"
-              showIcon
-              style={{ marginTop: 12 }}
-              message="为什么优化曲线可能越来越差"
-              description={
-                <Space direction="vertical" size={6}>
-                  <span>蓝线表示“当前轮最优”，绿线表示“当前轮平均”，橙色虚线表示“累计历史最优”。</span>
-                  <span>当前轮最优下降不代表历史最优被覆盖，而是说明新一轮探索没有超过旧最佳，或者为了扩大搜索空间尝试了更激进但更弱的候选。</span>
-                </Space>
-              }
-            />
+            <div className="rdagent-trace-label">Accepted 候选</div>
+            {acceptedFactors.length ? (
+              <div className="rdagent-candidate-grid">
+                {acceptedFactors.map((factor, index) => {
+                  const score = factor.task_details?.rdagent?.candidate_score || {};
+                  const correlationDisplay = getRDAgentCorrelationDisplay(score.max_correlation_with_sota);
+                  return (
+                    <div key={`${factor.candidate_id || factor.name}-accepted-${index}`} className={`rdagent-candidate rdagent-candidate-${factor.status || "accepted"}`}>
+                      <div className="rdagent-candidate-top">
+                        <span className="rdagent-candidate-name">{factor.name || `Accepted ${index + 1}`}</span>
+                        <Space wrap size={6}>
+                          <Tag color="green">Accepted</Tag>
+                          <Tag color="blue">Score {Number(factor.score || 0).toFixed(1)}</Tag>
+                          {!correlationDisplay.placeholder ? <Tag color={correlationDisplay.color}>{correlationDisplay.text}</Tag> : null}
+                        </Space>
+                      </div>
+                      <div className="factor-expression">{factor.expression}</div>
+                      <Space wrap size={[4, 8]} className="rdagent-candidate-metrics">
+                        <Tag>rankIC {Number(score.rank_ic ?? factor.rank_ic ?? 0).toFixed(3)}</Tag>
+                        <Tag>Sharpe {Number(score.sharpe ?? factor.sharpe ?? 0).toFixed(2)}</Tag>
+                        <Tag>Fitness {Number(factor.fitness ?? factor.wq_brain?.wq_fitness ?? 0).toFixed(2)}</Tag>
+                      </Space>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <Alert type="info" showIcon message="当前还没有通过入选阈值的候选" />
+            )}
           </div>
         </div>
       </div>
@@ -3971,6 +4050,7 @@ const FactorMining: React.FC = () => {
               </Panel>
 
               <Panel header="3. RDAgent Loop 参数" key="loop">
+                {renderRDAgentRuntimeAlert()}
                 <Row gutter={16}>
                   <Col xs={24} sm={12}>
                     <Form.Item label="最大优化轮数" name="max_iterations" rules={[{ required: true, message: "请输入最大优化轮数" }]}>
@@ -3997,6 +4077,20 @@ const FactorMining: React.FC = () => {
                 </Row>
                 <Form.Item label="优化方向" name="direction">
                   <Select allowClear options={OPTIMIZATION_DIRECTION_OPTIONS} />
+                </Form.Item>
+                <Form.Item label="执行器模式" name="execution_mode">
+                  <Select
+                    onChange={(value) => {
+                      if (value === "upstream_rdagent") {
+                        void loadRDAgentRuntimeStatus();
+                      }
+                    }}
+                    options={[
+                      { label: "原生代码执行器", value: "native_code" },
+                      { label: "本地 DSL 执行器", value: "expression" },
+                      { label: "Upstream RDAgent 执行器", value: "upstream_rdagent" },
+                    ]}
+                  />
                 </Form.Item>
                 <Row gutter={16}>
                   <Col xs={24} sm={12}>

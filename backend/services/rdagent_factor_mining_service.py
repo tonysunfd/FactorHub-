@@ -10,7 +10,11 @@ import pandas as pd
 
 from backend.services.auto_factor_mining_service import AutoFactorMiningService
 from backend.services.expression_schema import FactorEvaluationResult
+from backend.services.factor_evaluation_service import FactorEvaluationService
 from backend.services.llm_config_service import llm_config_service
+from backend.services.rdagent_native_code_executor import RDAgentNativeCodeExecutor
+from backend.services.rdagent_runtime import get_rdagent_runtime_status, probe_rdagent_module_import
+from backend.services.rdagent_upstream_proposal_adapter import RDAgentUpstreamProposalAdapter
 from backend.services.research_tools.rdagent_expression_contract import (
     RDAgentExpressionFormatError,
     normalize_rdagent_expression_for_parser,
@@ -67,6 +71,7 @@ class RDAgentMiningConfig:
     previous_feedback_id: str | None = None
     previous_expressions: list[str] = field(default_factory=list)
     previous_sota_expressions: list[str] = field(default_factory=list)
+    execution_mode: str = "native_code"
     cancel_check: Callable[[], None] | None = None
 
 
@@ -81,6 +86,9 @@ class RDAgentFactorMiningService:
     ) -> None:
         self._auto_mining_service = auto_mining_service or AutoFactorMiningService()
         self._llm_client_factory = llm_client_factory
+        self._native_code_executor = RDAgentNativeCodeExecutor()
+        self._upstream_proposal_adapter = RDAgentUpstreamProposalAdapter()
+        self._factor_evaluation_service = FactorEvaluationService()
 
     def run(
         self,
@@ -317,6 +325,25 @@ class RDAgentFactorMiningService:
         iteration: int,
         current_base_factors: list[str],
     ) -> dict[str, Any]:
+        execution_mode = str(config.execution_mode or "native_code").strip().lower()
+        if execution_mode == "upstream_rdagent":
+            proposal = self._generate_upstream_round_plan(
+                config=config,
+                rounds=rounds,
+                iteration=iteration,
+                current_base_factors=current_base_factors,
+            )
+            upstream_hypothesis = proposal.get("hypothesis") or {}
+            return {
+                "statement": str(upstream_hypothesis.get("statement") or f"第 {iteration} 轮围绕 {config.objective} 挖掘新因子").strip(),
+                "reason": str(upstream_hypothesis.get("reason") or "由 upstream RD-Agent proposal 生成。").strip(),
+                "research_direction": str(config.direction or "score").strip(),
+                "expected_signal": str(upstream_hypothesis.get("concise_observation") or "提升综合分数与稳定性").strip(),
+                "base_factors": list(current_base_factors),
+                "candidate_universe": list(config.candidate_universe),
+                "previous_feedback_id": config.previous_feedback_id,
+                "upstream_proposal": proposal,
+            }
         llm_response = self._call_llm_json(
             system_prompt=_RDAGENT_HYPOTHESIS_SYSTEM_PROMPT,
             user_prompt=self._build_hypothesis_prompt(
@@ -347,6 +374,44 @@ class RDAgentFactorMiningService:
         current_base_factors: list[str],
         known_expressions: list[str],
     ) -> dict[str, Any]:
+        execution_mode = str(config.execution_mode or "native_code").strip().lower()
+        if execution_mode == "upstream_rdagent":
+            proposal = hypothesis.get("upstream_proposal") or self._generate_upstream_round_plan(
+                config=config,
+                rounds=rounds,
+                iteration=iteration,
+                current_base_factors=current_base_factors,
+            )
+            tasks = list(proposal.get("tasks") or [])
+            factor_formulations = [
+                str(task.get("formulation") or task.get("factor_name") or "").strip()
+                for task in tasks
+                if str(task.get("formulation") or task.get("factor_name") or "").strip()
+            ]
+            base_factors = list(current_base_factors)
+            if not base_factors:
+                selection = self._auto_mining_service.select_factors(
+                    prompt=f"{config.objective} {config.direction or ''}".strip(),
+                    max_factor_count=max(int(config.candidates_per_iteration or 1), 1),
+                    candidate_limit=40,
+                    selection_mode="auto",
+                )
+                base_factors = selection.get("selected_factors", [])
+            return {
+                "round_index": iteration,
+                "candidate_limit": max(int(config.candidates_per_iteration or 1), 1),
+                "base_factors": base_factors,
+                "candidate_universe": list(config.candidate_universe),
+                "execution_mode": config.execution_mode,
+                "sota_expressions": [
+                    str(item.get("expression") or "").strip()
+                    for item in (rounds[-1].get("sota_candidates") or [])
+                ] if rounds else [],
+                "hypothesis_summary": hypothesis.get("statement"),
+                "evaluation_focus": hypothesis.get("expected_signal"),
+                "factor_formulations": factor_formulations,
+                "upstream_tasks": tasks,
+            }
         factor_formulations = self._generate_factor_formulations(
             config=config,
             hypothesis=hypothesis,
@@ -369,6 +434,7 @@ class RDAgentFactorMiningService:
             "candidate_limit": max(int(config.candidates_per_iteration or 1), 1),
             "base_factors": base_factors,
             "candidate_universe": list(config.candidate_universe),
+            "execution_mode": config.execution_mode,
             "sota_expressions": [
                 str(item.get("expression") or "").strip()
                 for item in (rounds[-1].get("sota_candidates") or [])
@@ -387,6 +453,57 @@ class RDAgentFactorMiningService:
         rounds: list[dict[str, Any]],
         iteration: int,
     ) -> dict[str, Any]:
+        execution_mode = str(config.execution_mode or "native_code").strip().lower()
+        if execution_mode == "native_code":
+            return self._code_native_experiment(
+                config=config,
+                experiment=experiment,
+                hypothesis=hypothesis,
+                rounds=rounds,
+                iteration=iteration,
+            )
+        if execution_mode == "upstream_rdagent":
+            runtime_status = get_rdagent_runtime_status()
+            proposal_importable, proposal_import_error = probe_rdagent_module_import(
+                "rdagent.scenarios.qlib.proposal.factor_proposal"
+            )
+            if not runtime_status.get("active_path") or not proposal_importable:
+                raise ValueError(
+                    "upstream_rdagent 执行器当前不可用：reference RD-Agent proposal 运行时未就绪。"
+                    f" import_error={proposal_import_error or runtime_status.get('import_error') or 'unknown'}"
+                )
+            upstream_tasks = list(experiment.get("upstream_tasks") or [])
+            coded_items = []
+            for index, task in enumerate(upstream_tasks):
+                factor_name = str(task.get("factor_name") or f"UpstreamFactor{index + 1}").strip()
+                formulation = str(task.get("formulation") or factor_name).strip()
+                diagnostics = [
+                    {
+                        "type": "info",
+                        "label": "upstream_rdagent",
+                        "text": "候选由 reference RD-Agent proposal 生成，执行与评估仍使用 FactorHub 本地链路。",
+                    }
+                ]
+                coded_items.append(
+                    {
+                        "candidate_id": f"{config.task_id}-round-{iteration}-candidate-{index + 1}",
+                        "raw_expression": formulation,
+                        "expression": formulation,
+                        "factor_name": factor_name,
+                        "description": str(task.get("description") or factor_name),
+                        "factor_formulation": formulation,
+                        "variables": dict(task.get("variables") or {}),
+                        "diagnostics": diagnostics,
+                    }
+                )
+            return {
+                "round_index": iteration,
+                "base_factors": list(experiment.get("base_factors") or []),
+                "candidate_universe": list(experiment.get("candidate_universe") or []),
+                "execution_mode": "upstream_rdagent",
+                "coded_items": coded_items,
+            }
+
         coded_items: list[dict[str, Any]] = []
         for index, expression in enumerate(experiment.get("factor_formulations") or []):
             normalized_expression = normalize_rdagent_expression_for_parser(expression)
@@ -418,6 +535,58 @@ class RDAgentFactorMiningService:
             "coded_items": coded_items,
         }
 
+    def _code_native_experiment(
+        self,
+        *,
+        config: RDAgentMiningConfig,
+        experiment: dict[str, Any],
+        hypothesis: dict[str, Any],
+        rounds: list[dict[str, Any]],
+        iteration: int,
+    ) -> dict[str, Any]:
+        coded_items: list[dict[str, Any]] = []
+        accepted_code_examples = [
+            str((item.get("execution_meta") or {}).get("implementation_code") or "").strip()
+            for item in (rounds[-1].get("candidates") or [])
+            if str((item.get("execution_meta") or {}).get("implementation_code") or "").strip()
+        ] if rounds else []
+        for index in range(max(int(config.candidates_per_iteration or 1), 1)):
+            response = self._call_llm_json(
+                system_prompt=self._native_code_executor.system_prompt,
+                user_prompt=self._native_code_executor.build_user_prompt(
+                    objective=config.objective,
+                    hypothesis=hypothesis,
+                    candidate_fields=list(experiment.get("candidate_universe") or []),
+                    base_factors=list(experiment.get("base_factors") or []),
+                    known_implementations=list(config.previous_expressions or []),
+                    accepted_code_examples=accepted_code_examples,
+                ),
+            )
+            diagnostics: list[dict[str, Any]] = []
+            try:
+                factor_name, implementation_code = self._native_code_executor.extract_code_from_llm_response(response)
+            except Exception as exc:
+                diagnostics.append({"type": "warning", "label": "代码回退", "text": str(exc)})
+                factor_name, implementation_code = self._native_code_executor.fallback_code(
+                    candidate_fields=list(experiment.get("candidate_universe") or []),
+                )
+            coded_items.append(
+                {
+                    "candidate_id": f"{config.task_id}-round-{iteration}-candidate-{index + 1}",
+                    "raw_expression": implementation_code,
+                    "expression": factor_name,
+                    "implementation_code": implementation_code,
+                    "diagnostics": diagnostics,
+                }
+            )
+        return {
+            "round_index": iteration,
+            "base_factors": list(experiment.get("base_factors") or []),
+            "candidate_universe": list(experiment.get("candidate_universe") or []),
+            "execution_mode": "native_code",
+            "coded_items": coded_items,
+        }
+
     def _run_experiment(
         self,
         *,
@@ -435,19 +604,11 @@ class RDAgentFactorMiningService:
         candidates: list[dict[str, Any]] = []
         evaluation_results: list[FactorEvaluationResult] = []
         for index, coded_item in enumerate(coded_experiment.get("coded_items") or []):
-            expression = coded_item.get("expression") or ""
-            evaluation = self._auto_mining_service.evaluate_expression(
-                expression=expression,
-                prompt=str(hypothesis.get("statement") or config.objective),
+            evaluation = self._evaluate_candidate(
+                config=config,
+                coded_item=coded_item,
                 stock_codes=stock_codes,
-                start_date=config.start_date,
-                end_date=config.end_date,
-                benchmark=config.benchmark,
-                n_groups=config.n_groups,
-                holding_period=config.holding_period,
-                direction=str(hypothesis.get("research_direction") or config.direction or "score"),
-                neutralize_industry=config.neutralize_industry,
-                neutralize_cap=config.neutralize_cap,
+                hypothesis=hypothesis,
             )
             if evaluation is None:
                 continue
@@ -484,6 +645,88 @@ class RDAgentFactorMiningService:
             "backtest_engine": "factorhub_rdagent_executor",
             "best_candidate": best_candidate,
         }
+
+    def _evaluate_candidate(
+        self,
+        *,
+        config: RDAgentMiningConfig,
+        coded_item: dict[str, Any],
+        stock_codes: list[str],
+        hypothesis: dict[str, Any],
+    ) -> FactorEvaluationResult | None:
+        execution_mode = str(config.execution_mode or "native_code").strip().lower()
+        if execution_mode != "native_code":
+            expression = coded_item.get("expression") or ""
+            return self._auto_mining_service.evaluate_expression(
+                expression=expression,
+                prompt=str(hypothesis.get("statement") or config.objective),
+                stock_codes=stock_codes,
+                start_date=config.start_date,
+                end_date=config.end_date,
+                benchmark=config.benchmark,
+                n_groups=config.n_groups,
+                holding_period=config.holding_period,
+                direction=str(hypothesis.get("research_direction") or config.direction or "score"),
+                neutralize_industry=config.neutralize_industry,
+                neutralize_cap=config.neutralize_cap,
+            )
+
+        implementation_code = str(coded_item.get("implementation_code") or coded_item.get("raw_expression") or "").strip()
+        if not implementation_code:
+            return None
+
+        panel, diagnostics = self._factor_evaluation_service._build_panel_from_stock_rows(
+            expression=implementation_code,
+            stock_codes=stock_codes,
+            start_date=config.start_date,
+            end_date=config.end_date,
+            holding_period=config.holding_period,
+            stock_data_loader=self._auto_mining_service.data_service.get_stock_data,
+            expression_executor=lambda stock_df, code: self._native_code_executor.execute_on_frame(stock_df, code),
+        )
+        if panel.empty:
+            return None
+
+        result = self._factor_evaluation_service._evaluate_panel(
+            panel=panel,
+            expression=str(coded_item.get("expression") or "RDAgentNativeFactor"),
+            prompt=str(hypothesis.get("statement") or config.objective),
+            benchmark=config.benchmark,
+            n_groups=config.n_groups,
+            holding_period=config.holding_period,
+            direction=str(hypothesis.get("research_direction") or config.direction or "score"),
+            benchmark_loader=self._auto_mining_service._load_benchmark_returns,
+            report_writer=self._auto_mining_service._write_candidate_report,
+            engine_type="rdagent_native_code",
+            dialect="python_factor_function",
+            canonical_expression=str(coded_item.get("expression") or "RDAgentNativeFactor"),
+            canonical_ast=None,
+            diagnostics=list(diagnostics or []) + list(coded_item.get("diagnostics") or []),
+            start_date=config.start_date,
+            end_date=config.end_date,
+            metrics_source="rdagent_native_code_executor",
+            execution_meta={
+                "implementation_code": implementation_code,
+                "execution_mode": "native_code",
+            },
+        )
+        return result
+
+    def _generate_upstream_round_plan(
+        self,
+        *,
+        config: RDAgentMiningConfig,
+        rounds: list[dict[str, Any]],
+        iteration: int,
+        current_base_factors: list[str],
+    ) -> dict[str, Any]:
+        return self._upstream_proposal_adapter.generate_round_plan(
+            objective=config.objective,
+            iteration=iteration,
+            candidate_universe=list(config.candidate_universe),
+            current_base_factors=list(current_base_factors),
+            rounds=rounds,
+        )
 
     def _generate_feedback(
         self,
@@ -729,7 +972,7 @@ class RDAgentFactorMiningService:
                     "rank_ic": evaluation.backtest_summary.get("rank_ic_mean"),
                     "sharpe": evaluation.report_metrics.get("sharpe", evaluation.backtest_summary.get("long_short_sharpe")),
                     "valid_coverage": 1.0,
-                    "max_correlation_with_sota": 0.0,
+                    "max_correlation_with_sota": None,
                 },
                 "hypothesis": hypothesis,
                 "acceptance_policy": acceptance_policy or {},
@@ -809,7 +1052,7 @@ class RDAgentFactorMiningService:
 
         max_corr = _safe_float(policy.get("max_correlation_with_sota"), 0.99)
         correlation = self._estimate_sota_correlation(candidate, policy.get("_sota_candidates") or [])
-        if correlation > max_corr:
+        if correlation is not None and correlation > max_corr:
             reasons.append(f"max_correlation_with_sota {correlation:.4f} 高于阈值 {max_corr:.4f}")
 
         status = "accepted" if not reasons else "watchlist"
@@ -846,22 +1089,24 @@ class RDAgentFactorMiningService:
         return merged[:20]
 
     @classmethod
-    def _estimate_sota_correlation(cls, candidate: dict[str, Any], sota_candidates: list[dict[str, Any]]) -> float:
+    def _estimate_sota_correlation(cls, candidate: dict[str, Any], sota_candidates: list[dict[str, Any]]) -> float | None:
         if not isinstance(sota_candidates, list):
-            return 0.0
+            return None
 
         candidate_frame = cls._extract_factor_frame(candidate)
         if candidate_frame.empty:
-            return 0.0
+            return None
 
-        max_correlation = 0.0
+        max_correlation: float | None = None
         for sota_candidate in sota_candidates:
             sota_frame = cls._extract_factor_frame(sota_candidate or {})
             if sota_frame.empty:
                 continue
             correlation = cls._calculate_factor_frame_correlation(candidate_frame, sota_frame)
-            max_correlation = max(max_correlation, correlation)
-        return round(max_correlation, 4)
+            if correlation is None:
+                continue
+            max_correlation = correlation if max_correlation is None else max(max_correlation, correlation)
+        return round(max_correlation, 4) if max_correlation is not None else None
 
     @staticmethod
     def _extract_factor_frame(payload: dict[str, Any]) -> pd.DataFrame:
@@ -893,16 +1138,16 @@ class RDAgentFactorMiningService:
         return frame
 
     @staticmethod
-    def _calculate_factor_frame_correlation(left: pd.DataFrame, right: pd.DataFrame) -> float:
+    def _calculate_factor_frame_correlation(left: pd.DataFrame, right: pd.DataFrame) -> float | None:
         if left.empty or right.empty:
-            return 0.0
+            return None
 
         merged = left.merge(right, on=["date", "stock_code"], how="inner", suffixes=("_left", "_right"))
         merged["factor_left"] = pd.to_numeric(merged["factor_left"], errors="coerce")
         merged["factor_right"] = pd.to_numeric(merged["factor_right"], errors="coerce")
         merged = merged.dropna(subset=["factor_left", "factor_right"])
         if len(merged) < 2:
-            return 0.0
+            return None
 
         pearson_values: list[float] = []
         spearman_values: list[float] = []
@@ -923,7 +1168,7 @@ class RDAgentFactorMiningService:
         overall_pearson = merged["factor_left"].corr(merged["factor_right"], method="pearson")
         overall_spearman = merged["factor_left"].corr(merged["factor_right"], method="spearman")
         fallback_metrics = [abs(float(value)) for value in (overall_pearson, overall_spearman) if pd.notna(value)]
-        return max(fallback_metrics, default=0.0)
+        return max(fallback_metrics) if fallback_metrics else None
 
     @classmethod
     def _sanitize_payload(cls, payload: Any) -> Any:

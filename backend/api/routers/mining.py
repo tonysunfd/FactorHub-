@@ -23,6 +23,7 @@ from backend.services.rdagent_factor_mining_service import (
     RDAgentMiningConfig,
     RDAgentTaskCancelled,
 )
+from backend.services.rdagent_runtime import get_rdagent_runtime_status
 from backend.api.routers.mining_progress import (
     build_auto_campaign_status,
     build_mining_status_payload,
@@ -171,6 +172,7 @@ class RDAgentMiningRequest(BaseModel):
     previous_feedback_id: Optional[str] = None
     previous_expressions: list[str] = []
     previous_sota_expressions: list[str] = []
+    execution_mode: str = "native_code"
     acceptance_policy: RDAgentAcceptancePolicy = RDAgentAcceptancePolicy()
 
 
@@ -421,6 +423,7 @@ async def _run_rdagent_mining(task_id: str, request: RDAgentMiningRequest) -> No
             previous_feedback_id=request.previous_feedback_id,
             previous_expressions=list(request.previous_expressions or []),
             previous_sota_expressions=list(request.previous_sota_expressions or []),
+            execution_mode=request.execution_mode,
             cancel_check=lambda: _raise_if_rdagent_task_cancel_requested(task_id),
         )
         service = RDAgentFactorMiningService()
@@ -1298,6 +1301,12 @@ async def get_rdagent_mining_status(task_id: str):
     if task_id not in rdagent_tasks:
         raise HTTPException(status_code=404, detail="任务不存在")
     return {"success": True, "data": _build_rdagent_status_payload(task_id, rdagent_tasks[task_id])}
+
+
+@router.get("/rdagent/runtime-status")
+async def get_rdagent_reference_runtime_status():
+    """获取 reference RD-Agent 运行时状态。"""
+    return {"success": True, "data": get_rdagent_runtime_status()}
 
 
 @router.get("/rdagent/results/{task_id}")

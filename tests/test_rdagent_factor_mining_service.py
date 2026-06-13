@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from types import SimpleNamespace
 
 import pandas as pd
@@ -54,8 +55,27 @@ class _FakeAutoMiningService:
         self.select_factors_calls: list[dict] = []
         self.select_continue_factors_calls: list[dict] = []
         self.evaluate_expression_calls: list[dict] = []
+        self._load_benchmark_returns = lambda benchmark, start_date, end_date: pd.Series(dtype=float)
+        self._write_candidate_report = lambda strategy_returns, benchmark_returns, periods_per_year: (
+            {"sharpe": 1.2, "max_drawdown": 0.03},
+            "/api/mining/reports/test-report.html",
+        )
         self.data_service = SimpleNamespace(
-            get_stock_universe=lambda universe, date=None: ["000001.SZ", "000002.SZ", "000004.SZ"]
+            get_stock_universe=lambda universe, date=None: [
+                "000001.SZ",
+                "000002.SZ",
+                "000004.SZ",
+                "000005.SZ",
+                "000006.SZ",
+                "000007.SZ",
+                "000008.SZ",
+                "000009.SZ",
+                "000010.SZ",
+                "000011.SZ",
+                "000012.SZ",
+                "000014.SZ",
+            ],
+            get_stock_data=lambda stock_code, start_date, end_date: _build_mock_stock_frame(stock_code),
         )
 
     def select_factors(self, **kwargs):
@@ -132,6 +152,29 @@ class _RecordingLLMClient:
         )
 
 
+def _build_mock_stock_frame(stock_code: str) -> pd.DataFrame:
+    stock_offset = (sum(ord(ch) for ch in stock_code) % 7) * 0.03
+    rows = []
+    for idx, date in enumerate(pd.date_range("2024-01-01", periods=60, freq="D")):
+        seasonal = math.sin(idx / 4 + stock_offset)
+        momentum = idx * 0.05
+        close = 10 + momentum + seasonal * 0.8 + stock_offset
+        open_price = close - 0.15 + math.cos(idx / 5 + stock_offset) * 0.05
+        rows.append(
+            {
+                "date": date,
+                "open": open_price,
+                "high": close + 0.25,
+                "low": close - 0.3,
+                "close": close,
+                "volume": 1000 + idx * 12 + (sum(ord(ch) for ch in stock_code) % 10) * 7 + seasonal * 60,
+                "amount": close * (1000 + idx * 12),
+                "pct_change": 0.01 * math.sin(idx / 6 + stock_offset),
+            }
+        )
+    return pd.DataFrame(rows).set_index("date")
+
+
 def test_rdagent_service_runs_independent_executor_flow(monkeypatch) -> None:
     monkeypatch.setattr(
         "backend.services.rdagent_factor_mining_service.llm_config_service.get_runtime_config",
@@ -163,6 +206,7 @@ def test_rdagent_service_runs_independent_executor_flow(monkeypatch) -> None:
             "max_drawdown_regression": 0.05,
             "min_valid_coverage": 0.8,
         },
+        execution_mode="expression",
     )
 
     result = service.run(
@@ -244,6 +288,7 @@ def test_rdagent_service_uses_continue_factor_selection_for_next_round(monkeypat
             universe="hs300",
             benchmark="000300.SH",
             acceptance_policy={},
+            execution_mode="expression",
         ),
     )
 
@@ -287,6 +332,7 @@ def test_rdagent_service_falls_back_when_llm_output_invalid(monkeypatch) -> None
             universe="hs300",
             benchmark="000300.SH",
             acceptance_policy={},
+            execution_mode="expression",
         ),
     )
 
@@ -378,6 +424,7 @@ def test_rdagent_second_round_prompt_includes_previous_sota_candidates(monkeypat
             universe="hs300",
             benchmark="000300.SH",
             acceptance_policy={},
+            execution_mode="expression",
         ),
     )
 
@@ -441,14 +488,15 @@ def test_rdagent_service_bootstraps_sota_library_from_previous_request() -> None
             candidate_universe=["close", "volume"],
             start_date="2024-01-01",
             end_date="2024-03-31",
-            universe="hs300",
-            benchmark="000300.SH",
-            previous_sota_expressions=["rank(ts_mean(close, 5))"],
-            acceptance_policy={
-                "max_correlation_with_sota": 0.2,
-            },
-        ),
-    )
+                universe="hs300",
+                benchmark="000300.SH",
+                previous_sota_expressions=["rank(ts_mean(close, 5))"],
+                acceptance_policy={
+                    "max_correlation_with_sota": 0.2,
+                },
+                execution_mode="expression",
+            ),
+        )
 
     sota_candidates = result["sota_candidates"]
     assert any(item["expression"] == "rank(ts_mean(close, 5))" for item in sota_candidates)
@@ -492,6 +540,7 @@ def test_rdagent_collects_global_top_factors_across_rounds(monkeypatch) -> None:
             universe="hs300",
             benchmark="000300.SH",
             acceptance_policy={},
+            execution_mode="expression",
         ),
     )
 
@@ -585,8 +634,135 @@ def test_rdagent_result_payload_strips_runtime_factor_frame() -> None:
             universe="hs300",
             benchmark="000300.SH",
             acceptance_policy={},
+            execution_mode="expression",
         ),
     )
 
     assert "_factor_frame" not in result["top_factors"][0]
     assert "factor_snapshot" not in result["sota_candidates"][0]
+
+
+def test_rdagent_native_code_mode_uses_factorhub_data_and_local_evaluation(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "backend.services.rdagent_factor_mining_service.llm_config_service.get_runtime_config",
+        lambda: {"api_key": "test-key", "base_url": "https://example.com/v1", "model": "deepseek-chat"},
+    )
+
+    class _NativeCodeLLMClient:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        def _create(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                content = (
+                    '{"statement":"价格与成交量联动可提升综合分数","reason":"先验证简单价量组合。",'
+                    '"research_direction":"score","expected_signal":"提升 Score"}'
+                )
+            elif self.calls == 2:
+                content = (
+                    '{"factor_formulations":["placeholder_expression"]}'
+                )
+            else:
+                content = (
+                    '{"factor_name":"PriceVolumeSignal",'
+                    '"implementation_code":"def calculate_factor(df):\\n'
+                    '    close = pd.to_numeric(df[\\\"close\\\"], errors=\\\"coerce\\\")\\n'
+                    '    volume = pd.to_numeric(df[\\\"volume\\\"], errors=\\\"coerce\\\")\\n'
+                    '    signal = close.pct_change(3).rolling(5, min_periods=1).mean() - volume.pct_change(5).rolling(5, min_periods=1).mean()\\n'
+                    '    return pd.Series(signal, index=df.index, dtype=float)",'
+                    '"implementation_notes":"simple"}'
+                )
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+
+    native_llm_client = _NativeCodeLLMClient()
+    service = RDAgentFactorMiningService(
+        auto_mining_service=_FakeAutoMiningService(),
+        llm_client_factory=lambda runtime_config: native_llm_client,
+    )
+
+    result = service.run(
+        task_id="rdagent-native",
+        config=RDAgentMiningConfig(
+            task_id="rdagent-native",
+            objective="提升综合分数",
+            max_iterations=1,
+            candidates_per_iteration=1,
+            base_factors=["AlphaSeed"],
+            candidate_universe=["close", "volume"],
+            start_date="2024-01-01",
+            end_date="2024-03-31",
+            universe="hs300",
+            benchmark="000300.SH",
+            acceptance_policy={},
+            execution_mode="native_code",
+        ),
+    )
+
+    factor = result["top_factors"][0]
+    assert factor["engine_type"] == "rdagent_native_code"
+    assert factor["dialect"] == "python_factor_function"
+    assert "implementation_code" in (factor.get("execution_meta") or {})
+
+
+def test_rdagent_upstream_mode_reuses_reference_proposal_and_local_evaluation(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "backend.services.rdagent_factor_mining_service.probe_rdagent_module_import",
+        lambda module_name: (True, None),
+    )
+    monkeypatch.setattr(
+        "backend.services.rdagent_factor_mining_service.get_rdagent_runtime_status",
+        lambda: {
+            "available": False,
+            "active_path": "/Users/tonysun/Desktop/reference/RD-Agent",
+            "python_path": "/Users/tonysun/miniconda3/bin/python3.13",
+            "checked_paths": [],
+            "importable": False,
+            "import_error": "fire missing",
+        },
+    )
+
+    service = RDAgentFactorMiningService(auto_mining_service=_FakeAutoMiningService())
+    monkeypatch.setattr(
+        service,
+        "_generate_upstream_round_plan",
+        lambda **kwargs: {
+            "hypothesis": {
+                "statement": "upstream 认为量价共振值得继续验证",
+                "reason": "先从简单方向切入。",
+                "concise_observation": "提升 Score",
+            },
+            "tasks": [
+                {
+                    "factor_name": "UpstreamVolumeFactor",
+                    "description": "[Momentum Factor] volume stabilized momentum",
+                    "formulation": "rank(ts_mean(volume, 10) / (ts_std(volume, 10) + 1e-6))",
+                    "variables": {"volume": "trading volume"},
+                }
+            ],
+        },
+    )
+
+    result = service.run(
+        task_id="rdagent-upstream",
+        config=RDAgentMiningConfig(
+            task_id="rdagent-upstream",
+            objective="提升综合分数",
+            max_iterations=1,
+            candidates_per_iteration=1,
+            base_factors=["AlphaSeed"],
+            candidate_universe=["close", "volume"],
+            start_date="2024-01-01",
+            end_date="2024-03-31",
+            universe="hs300",
+            benchmark="000300.SH",
+            acceptance_policy={},
+            execution_mode="upstream_rdagent",
+        ),
+    )
+
+    factor = result["top_factors"][0]
+    assert factor["expression"] == "rank(ts_mean(volume, 10) / (ts_std(volume, 10) + 1e-6))"
+    assert factor["engine_type"] == "quantgpt"
+    assert factor["task_details"]["rdagent"]["candidate_score"]["score"] >= 80

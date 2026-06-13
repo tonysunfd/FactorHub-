@@ -119,6 +119,7 @@ def test_rdagent_start_status_results_and_tasks(monkeypatch) -> None:
         benchmark="000300.SH",
         max_iterations=2,
         candidates_per_iteration=2,
+        execution_mode="native_code",
     )
 
     async def scenario() -> None:
@@ -134,6 +135,7 @@ def test_rdagent_start_status_results_and_tasks(monkeypatch) -> None:
         assert status["data"]["retained_count"] == 1
         assert status["data"]["request"]["max_iterations"] == 2
         assert status["data"]["request"]["candidate_universe"] == ["close", "volume"]
+        assert status["data"]["request"]["execution_mode"] == "native_code"
         assert result["data"]["final_round_result"]["factors"][0]["expression"] == "rank(close)"
         assert result["data"]["continue_mining_request"]["objective"] == "继续优化量价共振因子"
         assert result["data"]["continue_mining_request"]["payload"]["previous_sota_expressions"] == ["rank(close)"]
@@ -143,6 +145,47 @@ def test_rdagent_start_status_results_and_tasks(monkeypatch) -> None:
 
     asyncio.run(scenario())
     assert "task_id" in captured
+
+
+def test_rdagent_start_accepts_upstream_executor_mode(monkeypatch) -> None:
+    created_tasks: list[asyncio.Task] = []
+    original_create_task = asyncio.create_task
+
+    async def fake_run(task_id: str, request) -> None:
+        mining.rdagent_tasks[task_id]["status"] = "completed"
+        mining.rdagent_tasks[task_id]["progress"] = 100
+        mining.rdagent_tasks[task_id]["upstream_status"] = "rdagent_completed"
+        mining.rdagent_tasks[task_id]["result"] = {"task_id": task_id, "rounds": [], "retained_factors": [], "fitness_history": {"best": [], "average": []}, "final_round_result": {"factors": []}}
+
+    def tracked_create_task(coro):
+        task = original_create_task(coro)
+        created_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(mining, "_run_rdagent_mining", fake_run)
+    monkeypatch.setattr(mining.asyncio, "create_task", tracked_create_task)
+
+    request = mining.RDAgentMiningRequest(
+        objective="提升 score",
+        candidate_universe=["close", "volume"],
+        base_factors=["Alpha1"],
+        start_date="2024-01-01",
+        end_date="2024-03-31",
+        universe="hs300",
+        benchmark="000300.SH",
+        max_iterations=1,
+        candidates_per_iteration=1,
+        execution_mode="upstream_rdagent",
+    )
+
+    async def scenario() -> None:
+        response = await mining.start_rdagent_mining(request)
+        task_id = response["data"]["task_id"]
+        await asyncio.gather(*created_tasks)
+        status = await mining.get_rdagent_mining_status(task_id)
+        assert status["data"]["request"]["execution_mode"] == "upstream_rdagent"
+
+    asyncio.run(scenario())
 
 
 def test_cancel_rdagent_task_marks_cancelled() -> None:

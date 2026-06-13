@@ -23,6 +23,7 @@ type RDAgentMiningRequest = {
   continuation_of?: string
   previous_feedback_id?: string
   previous_expressions?: string[]
+  execution_mode?: string
   acceptance_policy: {
     max_correlation_with_sota: number
     min_rank_ic: number
@@ -452,6 +453,10 @@ export const api = {
 
   getRDAgentMiningStatus(taskId: string) {
     return request.get(`/mining/rdagent/status/${taskId}`, { timeout: 300000 })
+  },
+
+  getRDAgentRuntimeStatus() {
+    return request.get('/mining/rdagent/runtime-status', { timeout: 120000 })
   },
 
   getRDAgentMiningResults(taskId: string) {
