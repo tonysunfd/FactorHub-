@@ -1621,3 +1621,225 @@ def test_rdagent_upstream_mode_converts_trailing_symbolic_n_assignments(monkeypa
     assert any("ts_mean(((amount) / (volume)),5)" in expression for expression in expressions)
     assert any("ts_mean(close,5)" in expression and "ts_mean(volume,5)" in expression for expression in expressions)
     assert len(result["top_factors"]) == 3
+
+
+def test_rdagent_upstream_mode_converts_operatorname_ts_functions(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "backend.services.rdagent_factor_mining_service.probe_rdagent_module_import",
+        lambda module_name: (True, None),
+    )
+    monkeypatch.setattr(
+        "backend.services.rdagent_factor_mining_service.get_rdagent_runtime_status",
+        lambda: {
+            "available": True,
+            "active_path": "/Users/tonysun/Desktop/reference/RD-Agent",
+            "python_path": "/Users/tonysun/Desktop/Factorhub V3/.venv-rdagent/bin/python",
+            "checked_paths": [],
+        },
+    )
+
+    fake_auto_service = _FakeAutoMiningService()
+    service = RDAgentFactorMiningService(auto_mining_service=fake_auto_service)
+    monkeypatch.setattr(
+        service,
+        "_generate_upstream_round_plan",
+        lambda **kwargs: {
+            "hypothesis": {
+                "statement": "验证 operatorname 包裹的 ts 函数",
+                "reason": "覆盖真实 round 3 中半归一化的 ts_mean 与 ts_shift 表达。",
+                "concise_observation": "提升 Score",
+            },
+            "tasks": [
+                {
+                    "factor_name": "ImplicitPriceDeviation",
+                    "description": "隐含价格偏离",
+                    "formulation": r"\frac{\operatorname{ts\_mean}\left(\frac{amount}{volume},5\right)}{close}-1",
+                    "variables": {},
+                },
+                {
+                    "factor_name": "AmountPriceConfirmation",
+                    "description": "量价确认",
+                    "formulation": r"\left(\frac{close}{\operatorname{ts\_shift}(close,5)}-1\right)\times\left(\frac{\operatorname{ts\_mean}(amount,5)}{\operatorname{ts\_mean}(amount,20)}-1\right)",
+                    "variables": {},
+                },
+                {
+                    "factor_name": "PriceVolumeDivergence",
+                    "description": "价格与均价背离",
+                    "formulation": r"\left(\frac{close}{\operatorname{ts\_shift}(close,5)}-1\right)-\left(\frac{\frac{amount}{volume}}{\operatorname{ts\_shift}\left(\frac{amount}{volume},5\right)}-1\right)",
+                    "variables": {},
+                },
+            ],
+        },
+    )
+
+    result = service.run(
+        task_id="rdagent-upstream-operatorname-ts-functions",
+        config=RDAgentMiningConfig(
+            task_id="rdagent-upstream-operatorname-ts-functions",
+            objective="提升综合分数",
+            max_iterations=1,
+            candidates_per_iteration=3,
+            base_factors=[],
+            candidate_universe=["close", "volume", "amount"],
+            start_date="2024-01-01",
+            end_date="2024-03-31",
+            universe="hs300",
+            benchmark="000300.SH",
+            acceptance_policy={},
+            execution_mode="upstream_rdagent",
+        ),
+    )
+
+    expressions = [call["expression"] for call in fake_auto_service.evaluate_expression_calls]
+    assert any("ts_mean(((amount) / (volume)),5)" in expression for expression in expressions)
+    assert any("ts_shift(close,5)" in expression and "ts_mean(amount,20)" in expression for expression in expressions)
+    assert any("ts_shift(((amount) / (volume)),5)" in expression for expression in expressions)
+    assert len(result["top_factors"]) == 3
+
+
+def test_rdagent_upstream_mode_strips_t_suffix_from_ts_functions(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "backend.services.rdagent_factor_mining_service.probe_rdagent_module_import",
+        lambda module_name: (True, None),
+    )
+    monkeypatch.setattr(
+        "backend.services.rdagent_factor_mining_service.get_rdagent_runtime_status",
+        lambda: {
+            "available": True,
+            "active_path": "/Users/tonysun/Desktop/reference/RD-Agent",
+            "python_path": "/Users/tonysun/Desktop/Factorhub V3/.venv-rdagent/bin/python",
+            "checked_paths": [],
+        },
+    )
+
+    fake_auto_service = _FakeAutoMiningService()
+    service = RDAgentFactorMiningService(auto_mining_service=fake_auto_service)
+    monkeypatch.setattr(
+        service,
+        "_generate_upstream_round_plan",
+        lambda **kwargs: {
+            "hypothesis": {
+                "statement": "验证 ts 函数尾部 _t 后缀",
+                "reason": "覆盖真实 round 2 中 ts_mean/ts_std(... )_t 这种写法。",
+                "concise_observation": "提升 Score",
+            },
+            "tasks": [
+                {
+                    "factor_name": "zscore_close_10",
+                    "description": "10 日收盘 zscore",
+                    "formulation": r"\frac{close_t-\operatorname{ts\_mean}(close,10)_t}{\operatorname{ts\_std}(close,10)_t}",
+                    "variables": {},
+                },
+                {
+                    "factor_name": "price_volume_combo",
+                    "description": "价格与成交量均线偏离组合",
+                    "formulation": r"\left(\frac{close_t}{\operatorname{ts\_mean}(close,10)_t}-1\right)\times\left(\frac{volume_t}{\operatorname{ts\_mean}(volume,10)_t}-1\right)",
+                    "variables": {},
+                },
+                {
+                    "factor_name": "avg_price_mean_delta",
+                    "description": "平均成交价均线差",
+                    "formulation": r"\frac{\operatorname{ts\_mean}\left(\frac{amount}{volume},5\right)_t-\operatorname{ts\_mean}\left(\frac{amount}{volume},20\right)_t}{\operatorname{ts\_mean}\left(\frac{amount}{volume},20\right)_t}",
+                    "variables": {},
+                },
+            ],
+        },
+    )
+
+    result = service.run(
+        task_id="rdagent-upstream-strip-ts-t-suffix",
+        config=RDAgentMiningConfig(
+            task_id="rdagent-upstream-strip-ts-t-suffix",
+            objective="提升综合分数",
+            max_iterations=1,
+            candidates_per_iteration=3,
+            base_factors=[],
+            candidate_universe=["close", "volume", "amount"],
+            start_date="2024-01-01",
+            end_date="2024-03-31",
+            universe="hs300",
+            benchmark="000300.SH",
+            acceptance_policy={},
+            execution_mode="upstream_rdagent",
+        ),
+    )
+
+    expressions = [call["expression"] for call in fake_auto_service.evaluate_expression_calls]
+    assert any("ts_mean(close,10)" in expression and "ts_std(close,10)" in expression for expression in expressions)
+    assert any("ts_mean(volume,10)" in expression and "_t" not in expression for expression in expressions)
+    assert any("ts_mean(((amount) / (volume)),5)" in expression and "ts_mean(((amount) / (volume)),20)" in expression for expression in expressions)
+    assert len(result["top_factors"]) == 3
+
+
+def test_rdagent_upstream_mode_converts_abs_and_scientific_epsilon_formulations(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "backend.services.rdagent_factor_mining_service.probe_rdagent_module_import",
+        lambda module_name: (True, None),
+    )
+    monkeypatch.setattr(
+        "backend.services.rdagent_factor_mining_service.get_rdagent_runtime_status",
+        lambda: {
+            "available": True,
+            "active_path": "/Users/tonysun/Desktop/reference/RD-Agent",
+            "python_path": "/Users/tonysun/Desktop/Factorhub V3/.venv-rdagent/bin/python",
+            "checked_paths": [],
+        },
+    )
+
+    fake_auto_service = _FakeAutoMiningService()
+    service = RDAgentFactorMiningService(auto_mining_service=fake_auto_service)
+    monkeypatch.setattr(
+        service,
+        "_generate_upstream_round_plan",
+        lambda **kwargs: {
+            "hypothesis": {
+                "statement": "验证 abs 与 10^{-6} epsilon 样式",
+                "reason": "覆盖真实 round 3 暴露的绝对值与科学计数法写法。",
+                "concise_observation": "提升 Score",
+            },
+            "tasks": [
+                {
+                    "factor_name": "Friction_ImpliedAvgPriceDeviation_Change",
+                    "description": "隐含成交均价偏离变化",
+                    "formulation": r"\left(\frac{\frac{close_t}{\frac{amount_t}{volume_t+10^{-6}}}-1}{\operatorname{ts_mean}\left(\left|\frac{close_t}{\frac{amount_t}{volume_t+10^{-6}}}-1\right|,5\right)+10^{-6}}\right)",
+                    "variables": {},
+                },
+                {
+                    "factor_name": "LiquiditySupport_PriceRangeTurnoverRatio",
+                    "description": "流动性支撑与价格波动比",
+                    "formulation": r"\frac{\operatorname{ts_mean}\left(\frac{amount_t}{close_t+10^{-6}},5\right)}{\operatorname{ts_mean}\left(\left|\frac{close_t}{close_{t-1}}-1\right|,5\right)+10^{-6}}",
+                    "variables": {},
+                },
+                {
+                    "factor_name": "VolumeAcceptance_NonlinearDeviationRatio",
+                    "description": "成交量接受度非线性偏离",
+                    "formulation": r"\frac{\left(\frac{\operatorname{ts_mean}(volume,5)}{\operatorname{ts_mean}(volume,20)+10^{-6}}\right)^2}{\operatorname{ts_mean}\left(\left|\frac{close_t}{close_{t-1}}-1\right|,5\right)+10^{-6}}",
+                    "variables": {},
+                },
+            ],
+        },
+    )
+
+    result = service.run(
+        task_id="rdagent-upstream-abs-scientific-epsilon",
+        config=RDAgentMiningConfig(
+            task_id="rdagent-upstream-abs-scientific-epsilon",
+            objective="提升综合分数",
+            max_iterations=1,
+            candidates_per_iteration=3,
+            base_factors=[],
+            candidate_universe=["close", "volume", "amount"],
+            start_date="2024-01-01",
+            end_date="2024-03-31",
+            universe="hs300",
+            benchmark="000300.SH",
+            acceptance_policy={},
+            execution_mode="upstream_rdagent",
+        ),
+    )
+
+    expressions = [call["expression"] for call in fake_auto_service.evaluate_expression_calls]
+    assert any("abs(" in expression and "1e-6" in expression for expression in expressions)
+    assert any("ts_mean(((amount) / (close+1e-6)),5)" in expression for expression in expressions)
+    assert any("**2" in expression and "ts_mean(volume,20)+1e-6" in expression for expression in expressions)
+    assert len(result["top_factors"]) == 3

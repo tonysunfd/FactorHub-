@@ -923,6 +923,7 @@ class RDAgentFactorMiningService:
         expression = expression.replace("\\cdot", "*").replace("\\times", "*")
         expression = expression.replace("\\,", "")
         expression = expression.replace("\\ ", "")
+        expression = expression.replace("\\_", "_")
         expression = re.sub(r",?\s*\\quad\s*[A-Za-z]\s*=\s*\d+\s*$", "", expression)
         expression = re.sub(r"\\text\{[^}]*\}", "", expression)
         expression = re.sub(r"^\s*[A-Za-z][A-Za-z0-9_]*_\{\}\s*=\s*", "", expression)
@@ -933,6 +934,7 @@ class RDAgentFactorMiningService:
             if not any(op in lhs for op in ["/", "*", "+", "-"]):
                 expression = rhs.strip()
         expression = expression.replace("\\varepsilon", "1e-6").replace("\\epsilon", "1e-6")
+        expression = re.sub(r"\\operatorname\{(ts_[A-Za-z_][A-Za-z0-9_]*)\}", r"\1", expression)
         expression = self._replace_reference_window_operators(expression)
         expression = self._replace_reference_volatility_term(expression)
         expression = self._replace_reference_sum_averages(expression)
@@ -943,6 +945,9 @@ class RDAgentFactorMiningService:
         expression = self._replace_latex_sums(expression)
         expression = self._replace_latex_frac(expression)
         expression = self._replace_latex_tokens(expression)
+        expression = self._replace_absolute_value_bars(expression)
+        expression = expression.replace("10**(-6)", "1e-6").replace("10**(-06)", "1e-6")
+        expression = self._strip_ts_function_time_suffix(expression)
         expression = re.sub(r"^\s*[A-Za-z][A-Za-z0-9_]*_\(\)\s*=\s*", "", expression)
         expression = re.sub(r"(\))(?=ts_[A-Za-z_]+\()", r"\1 * ", expression)
         expression = re.sub(r"\s+", " ", expression).strip()
@@ -1301,6 +1306,38 @@ class RDAgentFactorMiningService:
                 if depth == 0:
                     return index
         return -1
+
+    @staticmethod
+    def _strip_ts_function_time_suffix(expression: str) -> str:
+        result = str(expression or "")
+        search_start = 0
+        while True:
+            match = re.search(r"\bts_[A-Za-z_][A-Za-z0-9_]*\(", result[search_start:])
+            if not match:
+                break
+            paren_start = search_start + match.end() - 1
+            paren_end = RDAgentFactorMiningService._find_matching_parenthesis(result, paren_start)
+            if paren_end == -1:
+                search_start = paren_start + 1
+                continue
+            if result[paren_end + 1:paren_end + 3] == "_t":
+                result = result[:paren_end + 1] + result[paren_end + 3:]
+            search_start = paren_end + 1
+        return result
+
+    @staticmethod
+    def _replace_absolute_value_bars(expression: str) -> str:
+        result = str(expression or "")
+        while "|" in result:
+            start = result.find("|")
+            if start == -1:
+                break
+            end = result.find("|", start + 1)
+            if end == -1:
+                break
+            inner = result[start + 1:end].strip()
+            result = result[:start] + f"abs({inner})" + result[end + 1:]
+        return result
 
     @staticmethod
     def _find_top_level_equal(text: str) -> int:
