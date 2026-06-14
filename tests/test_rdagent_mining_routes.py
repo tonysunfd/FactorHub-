@@ -67,6 +67,15 @@ def test_rdagent_start_status_results_and_tasks(monkeypatch) -> None:
             {
                 "round_index": 1,
                 "task_id": f"{task_id}-round-1",
+                "pipeline": {
+                    "execution_mode": "native_code",
+                    "proposal": "factorhub_local_hypothesis",
+                    "coder": "FactorHubRDAgentCoder",
+                    "runner": "FactorHubRDAgentRunner",
+                    "feedback": "FactorHubRDAgentFeedback",
+                    "data_source": "factorhub_v3_local_data_source",
+                    "evaluation_system": "factorhub_v3_local_evaluation",
+                },
                 "hypothesis": {"statement": "量价共振因子可提升综合分数"},
                 "feedback": {"observations": "本轮有 1 个候选通过筛选", "hypothesis_evaluation": "supported"},
                 "evaluation": {"best_score": 81.0, "avg_score": 74.0},
@@ -140,6 +149,11 @@ def test_rdagent_start_status_results_and_tasks(monkeypatch) -> None:
         assert result["data"]["continue_mining_request"]["objective"] == "继续优化量价共振因子"
         assert result["data"]["continue_mining_request"]["payload"]["previous_sota_expressions"] == ["rank(close)"]
         assert result["data"]["rounds"][0]["continuation_hypothesis"]["selected_for_next_round"] == ["Alpha1", "AlphaContinue"]
+        assert result["data"]["rounds"][0]["pipeline"]["coder"] == "FactorHubRDAgentCoder"
+        assert result["data"]["rounds"][0]["pipeline"]["runner"] == "FactorHubRDAgentRunner"
+        assert result["data"]["rounds"][0]["pipeline"]["feedback"] == "FactorHubRDAgentFeedback"
+        assert result["data"]["rounds"][0]["pipeline"]["data_source"] == "factorhub_v3_local_data_source"
+        assert result["data"]["rounds"][0]["pipeline"]["evaluation_system"] == "factorhub_v3_local_evaluation"
         assert tasks["data"][0]["task_id"] == task_id
         assert tasks["data"][0]["kind"] == "rdagent"
 

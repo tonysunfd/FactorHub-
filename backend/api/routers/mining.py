@@ -326,6 +326,7 @@ def _build_rdagent_round_from_service(round_item: dict[str, Any], task_id: str) 
     return {
         "round_index": round_item.get("round_index", 0),
         "task_id": f"{task_id}-round-{round_item.get('round_index', 0)}",
+        "pipeline": round_item.get("pipeline") or {},
         "best_score": evaluation.get("best_score", 0.0),
         "avg_score": evaluation.get("avg_score", 0.0),
         "input_base_factors": list(experiment.get("base_factors") or hypothesis.get("base_factors") or []),
