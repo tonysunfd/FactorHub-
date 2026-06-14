@@ -2972,8 +2972,8 @@ const FactorMining: React.FC = () => {
     return [
       { key: "hypothesis", title: "Research", description: "基于目标和反馈生成下一轮 hypothesis" },
       { key: "experiment", title: "Design Experiment", description: "把 hypothesis 展开成 experiment tasks" },
-      { key: "coding", title: "Implementation", description: "映射为 FactorHub 可计算表达式" },
-      { key: "running", title: "Evaluation", description: "复用统一回测/评分体系计算指标" },
+      { key: "coding", title: "Implementation", description: "映射为本地可执行表达式或 Python 因子函数" },
+      { key: "running", title: "Evaluation", description: "复用 FactorHub 本地回测与评分体系计算指标" },
       { key: "feedback", title: "Feedback", description: "根据阈值接收或拒绝候选" },
       { key: "trace", title: "Trace", description: "沉淀候选、证据与下一轮线索" },
     ].map((stage, index) => ({
@@ -4088,7 +4088,7 @@ const FactorMining: React.FC = () => {
                     options={[
                       { label: "原生代码执行器", value: "native_code" },
                       { label: "本地 DSL 执行器", value: "expression" },
-                      { label: "Upstream RDAgent 执行器", value: "upstream_rdagent" },
+                      { label: "Reference Proposal 适配执行器", value: "upstream_rdagent" },
                     ]}
                   />
                 </Form.Item>
@@ -4799,7 +4799,7 @@ const FactorMining: React.FC = () => {
             {activeTab === "manual"
               ? "选择基础因子后运行 FactorHub 原有挖掘逻辑。"
               : activeTab === "rdagent"
-                ? "配置研究目标和筛选条件后，在 FactorHub 内运行多轮候选生成、回测与保留。"
+                ? "配置研究目标和筛选条件后，在 FactorHub 内运行多轮 hypothesis、候选实现、本地回测评估与保留。Reference Proposal 模式只复用 upstream proposal，不等于完整 reference RD-Agent loop。"
                 : "从因子库导入基础因子后，通过 FactorHub 本地自动挖掘链路完成表达式生成、回测评估与候选迭代。"}
           </p>
         </div>

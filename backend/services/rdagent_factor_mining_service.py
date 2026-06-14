@@ -13,6 +13,12 @@ from backend.services.auto_factor_mining_service import AutoFactorMiningService
 from backend.services.expression_schema import FactorEvaluationResult
 from backend.services.factor_evaluation_service import FactorEvaluationService
 from backend.services.llm_config_service import llm_config_service
+from backend.services.rdagent_local_pipeline import (
+    FactorHubRDAgentCoder,
+    FactorHubRDAgentFeedback,
+    FactorHubRDAgentRunner,
+    build_factorhub_rdagent_pipeline_metadata,
+)
 from backend.services.rdagent_native_code_executor import RDAgentNativeCodeExecutor
 from backend.services.rdagent_runtime import get_rdagent_runtime_status, probe_rdagent_module_import
 from backend.services.rdagent_upstream_proposal_adapter import RDAgentUpstreamProposalAdapter
@@ -91,6 +97,9 @@ class RDAgentFactorMiningService:
         self._native_code_executor = RDAgentNativeCodeExecutor()
         self._upstream_proposal_adapter = RDAgentUpstreamProposalAdapter()
         self._factor_evaluation_service = FactorEvaluationService()
+        self._local_coder = FactorHubRDAgentCoder(code_experiment_fn=self._code_experiment)
+        self._local_runner = FactorHubRDAgentRunner(run_experiment_fn=self._run_experiment)
+        self._local_feedback = FactorHubRDAgentFeedback(generate_feedback_fn=self._generate_feedback)
 
     def run(
         self,
@@ -148,7 +157,7 @@ class RDAgentFactorMiningService:
             emit("rdagent_experiment", iteration, experiment)
 
             self._raise_if_cancelled(config)
-            coded_experiment = self._code_experiment(
+            coded_experiment = self._local_coder.develop(
                 config=config,
                 experiment=experiment,
                 hypothesis=hypothesis,
@@ -158,7 +167,7 @@ class RDAgentFactorMiningService:
             emit("rdagent_coding", iteration, coded_experiment)
 
             self._raise_if_cancelled(config)
-            run_result = self._run_experiment(
+            run_result = self._local_runner.develop(
                 config=config,
                 coded_experiment=coded_experiment,
                 hypothesis=hypothesis,
@@ -189,7 +198,7 @@ class RDAgentFactorMiningService:
             )
 
             self._raise_if_cancelled(config)
-            feedback = self._generate_feedback(
+            feedback = self._local_feedback.generate_feedback(
                 config=config,
                 hypothesis=hypothesis,
                 experiment=experiment,
@@ -236,6 +245,9 @@ class RDAgentFactorMiningService:
                 "continuation_selection": continuation_selection,
                 "next_base_factors": list(next_base_factors),
                 "sota_candidates": list(updated_sota_candidates),
+                "pipeline": build_factorhub_rdagent_pipeline_metadata(
+                    execution_mode=str(config.execution_mode or "native_code").strip().lower(),
+                ),
             }
             rounds.append(round_item)
 
@@ -628,6 +640,7 @@ class RDAgentFactorMiningService:
 
         candidates: list[dict[str, Any]] = []
         evaluation_results: list[FactorEvaluationResult] = []
+        skipped_candidates: list[dict[str, Any]] = []
         for index, coded_item in enumerate(coded_experiment.get("coded_items") or []):
             evaluation = self._evaluate_candidate(
                 config=config,
@@ -636,6 +649,14 @@ class RDAgentFactorMiningService:
                 hypothesis=hypothesis,
             )
             if evaluation is None:
+                skipped_candidates.append(
+                    self._build_skipped_candidate_diagnostic(
+                        config=config,
+                        coded_item=coded_item,
+                        iteration=iteration,
+                        index=index,
+                    )
+                )
                 continue
             evaluation_results.append(evaluation)
             candidate_payload = self._format_candidate_payload(
@@ -649,7 +670,11 @@ class RDAgentFactorMiningService:
             candidates.append(candidate_payload)
 
         if not candidates:
-            raise ValueError("RDAgent 本轮没有产出可评估的候选表达式")
+            raise ValueError(self._build_empty_candidate_error_message(
+                config=config,
+                iteration=iteration,
+                skipped_candidates=skipped_candidates,
+            ))
 
         candidates.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
         policy = dict(config.acceptance_policy or {})
@@ -670,6 +695,71 @@ class RDAgentFactorMiningService:
             "backtest_engine": "factorhub_rdagent_executor",
             "best_candidate": best_candidate,
         }
+
+    def _build_skipped_candidate_diagnostic(
+        self,
+        *,
+        config: RDAgentMiningConfig,
+        coded_item: dict[str, Any],
+        iteration: int,
+        index: int,
+    ) -> dict[str, Any]:
+        execution_mode = str(config.execution_mode or "native_code").strip().lower()
+        factor_name = str(
+            coded_item.get("factor_name")
+            or coded_item.get("expression")
+            or coded_item.get("raw_expression")
+            or f"candidate_{index + 1}"
+        ).strip()
+        diagnostics = list(coded_item.get("diagnostics") or [])
+        if coded_item.get("upstream_conversion_failed"):
+            reason = "upstream formulation 未能转换为 FactorHub 可执行表达式或 Python 因子函数"
+        elif execution_mode == "native_code" and not str(coded_item.get("implementation_code") or "").strip():
+            reason = "native_code 候选未生成 implementation_code"
+        elif execution_mode == "upstream_rdagent" and str(coded_item.get("implementation_code") or "").strip():
+            reason = "Python 因子函数在本地数据评估时未产出有效 panel"
+        else:
+            reason = "候选表达式未通过本地评估，可能是字段/函数不支持、panel 为空或回测数据不足"
+        return {
+            "candidate_id": coded_item.get("candidate_id") or f"{config.task_id}-round-{iteration}-candidate-{index + 1}",
+            "factor_name": factor_name,
+            "reason": reason,
+            "raw_expression": str(coded_item.get("raw_expression") or "")[:240],
+            "expression": str(coded_item.get("expression") or "")[:240],
+            "diagnostics": diagnostics,
+        }
+
+    def _build_empty_candidate_error_message(
+        self,
+        *,
+        config: RDAgentMiningConfig,
+        iteration: int,
+        skipped_candidates: list[dict[str, Any]],
+    ) -> str:
+        if not skipped_candidates:
+            return "RDAgent 本轮没有产出可评估的候选表达式"
+
+        reason_counter: dict[str, int] = {}
+        for item in skipped_candidates:
+            reason = str(item.get("reason") or "unknown").strip() or "unknown"
+            reason_counter[reason] = reason_counter.get(reason, 0) + 1
+
+        summary = "；".join(f"{reason} x{count}" for reason, count in reason_counter.items())
+        samples = []
+        for item in skipped_candidates[:3]:
+            factor_name = str(item.get("factor_name") or item.get("candidate_id") or "candidate").strip()
+            raw_expression = str(item.get("raw_expression") or item.get("expression") or "").strip()
+            if raw_expression:
+                samples.append(f"{factor_name}: {raw_expression[:120]}")
+            else:
+                samples.append(f"{factor_name}: <empty>")
+        sample_text = " | ".join(samples)
+        return (
+            f"RDAgent 本轮没有产出可评估的候选表达式。"
+            f" execution_mode={config.execution_mode}，round={iteration}。"
+            f" 跳过原因汇总：{summary}。"
+            f" 候选样例：{sample_text}"
+        )
 
     def _evaluate_candidate(
         self,
@@ -816,14 +906,20 @@ class RDAgentFactorMiningService:
         if normalized_expression and self._looks_like_factorhub_expression(normalized_expression):
             return normalized_expression
 
+        expression = re.sub(r"^\s*[A-Za-z][A-Za-z0-9_]*(?:_\{?[A-Za-z0-9+\-]+\}?)?\s*\(t\)\s*=\s*", "", expression)
         expression = re.sub(r"^\s*[A-Za-z][A-Za-z0-9_]*\s*=\s*", "", expression)
         expression = re.sub(r"^\s*F_t\s*=\s*", "", expression, flags=re.IGNORECASE)
         expression = expression.replace("\\\\", "\\")
         expression = expression.replace("\\left", "").replace("\\right", "")
         expression = expression.replace("\\cdot", "*").replace("\\times", "*")
         expression = expression.replace("\\,", "")
+        expression = re.sub(r"\\ln\s*\(", "log(", expression, flags=re.IGNORECASE)
+        expression = re.sub(r"\\log\s*\(", "log(", expression, flags=re.IGNORECASE)
+        expression = re.sub(r"\\sqrt\s*\(", "sqrt(", expression, flags=re.IGNORECASE)
+        expression = self._replace_latex_sums(expression)
         expression = self._replace_latex_frac(expression)
         expression = self._replace_latex_tokens(expression)
+        expression = re.sub(r"(\))(?=ts_[A-Za-z_]+\()", r"\1 * ", expression)
         expression = re.sub(r"\s+", " ", expression).strip()
 
         normalized_expression = self._normalize_candidate_expression(expression)
@@ -855,6 +951,22 @@ class RDAgentFactorMiningService:
             result = result[:match.start()] + replacement + result[denominator_end + 1:]
         return result
 
+    def _replace_latex_sums(self, expression: str) -> str:
+        result = str(expression or "")
+        sum_pattern = re.compile(
+            r"\\sum_\{i=1\}\^\{(\d+)\}\s*([A-Za-z_][A-Za-z0-9_]*)_\{t-i\}",
+            flags=re.IGNORECASE,
+        )
+        while True:
+            match = sum_pattern.search(result)
+            if not match:
+                break
+            window = match.group(1)
+            field = match.group(2).lower()
+            replacement = f"ts_sum({field},{window})"
+            result = result[:match.start()] + replacement + result[match.end():]
+        return result
+
     @staticmethod
     def _find_matching_brace(text: str, start: int) -> int:
         if start < 0 or start >= len(text) or text[start] != "{":
@@ -880,15 +992,33 @@ class RDAgentFactorMiningService:
             "v": "volume",
             "amt": "amount",
             "a": "amount",
+            "close": "close",
+            "open": "open",
+            "high": "high",
+            "low": "low",
+            "volume": "volume",
+            "amount": "amount",
         }
-        for token, field in field_aliases.items():
+        for token, field in sorted(field_aliases.items(), key=lambda item: len(item[0]), reverse=True):
             result = re.sub(
                 rf"\b{token}_\{{t-(\d+)\}}",
                 lambda match, field_name=field: f"ts_shift({field_name},{match.group(1)})",
                 result,
                 flags=re.IGNORECASE,
             )
+            result = re.sub(
+                rf"\b{token}_\{{t\}}",
+                field,
+                result,
+                flags=re.IGNORECASE,
+            )
             result = re.sub(rf"\b{token}_t\b", field, result, flags=re.IGNORECASE)
+            result = re.sub(
+                rf"\b{token}_\{{t-i\}}",
+                f"ts_shift({field},1)",
+                result,
+                flags=re.IGNORECASE,
+            )
 
         result = result.replace("{", "(").replace("}", ")")
         result = result.replace("^", "**")
