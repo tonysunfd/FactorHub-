@@ -873,7 +873,10 @@ class RDAgentFactorMiningService:
                 "conversion_note": "upstream 直接返回了 Python 因子函数，已走本地代码执行评估。",
             }
 
-        heuristic_expression = self._heuristic_convert_upstream_formulation(raw_formulation)
+        heuristic_expression = self._heuristic_convert_upstream_formulation(
+            raw_formulation,
+            variables=variables,
+        )
         if heuristic_expression:
             return {
                 "expression": heuristic_expression,
@@ -897,7 +900,12 @@ class RDAgentFactorMiningService:
 
         return {"expression": raw_formulation, "conversion_failed": True}
 
-    def _heuristic_convert_upstream_formulation(self, formulation: str) -> str:
+    def _heuristic_convert_upstream_formulation(
+        self,
+        formulation: str,
+        *,
+        variables: dict[str, Any] | None = None,
+    ) -> str:
         expression = str(formulation or "").strip()
         if not expression:
             return ""
@@ -906,19 +914,36 @@ class RDAgentFactorMiningService:
         if normalized_expression and self._looks_like_factorhub_expression(normalized_expression):
             return normalized_expression
 
-        expression = re.sub(r"^\s*[A-Za-z][A-Za-z0-9_]*(?:_\{?[A-Za-z0-9+\-]+\}?)?\s*\(t\)\s*=\s*", "", expression)
-        expression = re.sub(r"^\s*[A-Za-z][A-Za-z0-9_]*\s*=\s*", "", expression)
+        expression = re.sub(r"^\s*[A-Za-z][A-Za-z0-9_]*(?:_\{[^}]+\})?\s*\(t\)\s*=\s*", "", expression)
+        expression = re.sub(r"^\s*[A-Za-z][A-Za-z0-9_]*(?:_\{[^}]+\})?\s*=\s*", "", expression)
         expression = re.sub(r"^\s*F_t\s*=\s*", "", expression, flags=re.IGNORECASE)
+        expression = self._replace_symbolic_window_tokens(expression, variables or {})
         expression = expression.replace("\\\\", "\\")
         expression = expression.replace("\\left", "").replace("\\right", "")
         expression = expression.replace("\\cdot", "*").replace("\\times", "*")
         expression = expression.replace("\\,", "")
+        expression = expression.replace("\\ ", "")
+        expression = re.sub(r",?\s*\\quad\s*[A-Za-z]\s*=\s*\d+\s*$", "", expression)
+        expression = re.sub(r"\\text\{[^}]*\}", "", expression)
+        expression = re.sub(r"^\s*[A-Za-z][A-Za-z0-9_]*_\{\}\s*=\s*", "", expression)
+        top_level_equal = self._find_top_level_equal(expression)
+        if top_level_equal != -1:
+            lhs = expression[:top_level_equal]
+            rhs = expression[top_level_equal + 1:]
+            if not any(op in lhs for op in ["/", "*", "+", "-"]):
+                expression = rhs.strip()
+        expression = expression.replace("\\varepsilon", "1e-6").replace("\\epsilon", "1e-6")
+        expression = self._replace_reference_window_operators(expression)
+        expression = self._replace_reference_volatility_term(expression)
+        expression = self._replace_reference_sum_averages(expression)
         expression = re.sub(r"\\ln\s*\(", "log(", expression, flags=re.IGNORECASE)
         expression = re.sub(r"\\log\s*\(", "log(", expression, flags=re.IGNORECASE)
         expression = re.sub(r"\\sqrt\s*\(", "sqrt(", expression, flags=re.IGNORECASE)
+        expression = self._replace_latex_sqrt(expression)
         expression = self._replace_latex_sums(expression)
         expression = self._replace_latex_frac(expression)
         expression = self._replace_latex_tokens(expression)
+        expression = re.sub(r"^\s*[A-Za-z][A-Za-z0-9_]*_\(\)\s*=\s*", "", expression)
         expression = re.sub(r"(\))(?=ts_[A-Za-z_]+\()", r"\1 * ", expression)
         expression = re.sub(r"\s+", " ", expression).strip()
 
@@ -926,6 +951,113 @@ class RDAgentFactorMiningService:
         if normalized_expression and self._looks_like_factorhub_expression(normalized_expression):
             return normalized_expression
         return ""
+
+    def _replace_symbolic_window_tokens(self, expression: str, variables: dict[str, Any]) -> str:
+        result = str(expression or "")
+        resolved_windows = self._infer_symbolic_windows(result, variables)
+        for symbol, value in resolved_windows.items():
+            result = re.sub(rf"\\sum_\{{i=0\}}\^\{{{re.escape(symbol)}-1\}}", rf"\\sum_{{i=0}}^{{{value - 1}}}", result)
+            result = re.sub(rf"\\sum_\{{i=1\}}\^\{{{re.escape(symbol)}\}}", rf"\\sum_{{i=1}}^{{{value}}}", result)
+            result = re.sub(rf"\{{1\}}\{{{re.escape(symbol)}\}}", rf"{{1}}{{{value}}}", result)
+            result = re.sub(rf"_\{{{re.escape(symbol)}\}}", f"_{{{value}}}", result)
+            result = re.sub(rf"_\{{t-{re.escape(symbol)}\}}", f"_{{t-{value}}}", result)
+            result = re.sub(rf"_\{{t-{re.escape(symbol)}-1\}}", f"_{{t-{value}-1}}", result)
+            result = re.sub(rf"\^\{{\({re.escape(symbol)}\)\}}", f"^{{({value})}}", result)
+            result = re.sub(rf"\^\{{{re.escape(symbol)}\}}", f"^{{{value}}}", result)
+            result = re.sub(rf"\^\{{{re.escape(symbol)}-1\}}", f"^{{{value}-1}}", result)
+        return result
+
+    def _infer_symbolic_windows(self, expression: str, variables: dict[str, Any]) -> dict[str, int]:
+        result: dict[str, int] = {}
+        for key, value in (variables or {}).items():
+            if str(key).strip().lower() not in {"n", "window", "lookback"}:
+                continue
+            text = str(value or "")
+            match = re.search(r"(\d+)", text)
+            if match:
+                result[str(key).strip()] = int(match.group(1))
+
+        for match in re.finditer(r"(?:^|,|\\quad)\s*([A-Za-z])\s*=\s*(\d+)\b", expression):
+            symbol = match.group(1).strip()
+            if symbol not in result:
+                result[symbol] = int(match.group(2))
+
+        if "n" not in result and re.search(r"\b(?:MA|Mean|Std)_\{n\}|_\{t-n\}|\^\{n-1\}", expression, flags=re.IGNORECASE):
+            result["n"] = 5
+        return result
+
+    def _replace_reference_window_operators(self, expression: str) -> str:
+        result = str(expression or "")
+        field_aliases = {
+            "C": "close",
+            "V": "volume",
+            "A": "amount",
+            "O": "open",
+            "H": "high",
+            "L": "low",
+            "C_t": "close",
+            "V_t": "volume",
+            "A_t": "amount",
+        }
+
+        std_window_pattern = re.compile(
+            r"\\operatorname\{std\}\(\s*(.+?)\s*,\s*\\tau\s*=\s*t-(\d+)\s*,\s*\\ldots\s*,\s*t\s*\)",
+            flags=re.IGNORECASE,
+        )
+        while True:
+            match = std_window_pattern.search(result)
+            if not match:
+                break
+            inner_expression = match.group(1).strip()
+            lookback = int(match.group(2)) + 1
+            normalized_inner = inner_expression
+            normalized_inner = re.sub(r"\\frac\s*\{\s*C_\{\\tau\}\s*\}\s*\{\s*C_\{\\tau-1\}\s*\}\s*-\s*1", "returns", normalized_inner, flags=re.IGNORECASE)
+            normalized_inner = re.sub(r"\\frac\s*\{\s*close_\{\\tau\}\s*\}\s*\{\s*close_\{\\tau-1\}\s*\}\s*-\s*1", "returns", normalized_inner, flags=re.IGNORECASE)
+            replacement = f"ts_std({normalized_inner},{lookback})"
+            result = result[:match.start()] + replacement + result[match.end():]
+
+        ma_function_pattern = re.compile(
+            r"\\operatorname\{MA\}\(([^,]+),\s*(\d+)\)_t",
+            flags=re.IGNORECASE,
+        )
+        while True:
+            match = ma_function_pattern.search(result)
+            if not match:
+                break
+            raw_field = match.group(1).strip()
+            window = match.group(2)
+            mapped_field = field_aliases.get(raw_field, raw_field)
+            mapped_field = mapped_field.replace("A/V", "(amount / volume)").replace("a/v", "(amount / volume)")
+            replacement = f"ts_mean({mapped_field},{window})"
+            result = result[:match.start()] + replacement + result[match.end():]
+
+        operator_pattern = re.compile(
+            r"\\operatorname\{(MA|Mean|Std)\}_(?:\{(\d+)\}|(\d+))\(",
+            flags=re.IGNORECASE,
+        )
+        while True:
+            match = operator_pattern.search(result)
+            if not match:
+                break
+            operator_name = match.group(1).lower()
+            window = match.group(2) or match.group(3)
+            arg_start = match.end() - 1
+            arg_end = self._find_matching_parenthesis(result, arg_start)
+            if arg_end == -1:
+                break
+            raw_field = result[arg_start + 1:arg_end].strip()
+            mapped_field = field_aliases.get(raw_field, raw_field)
+            mapped_field = mapped_field.replace("A/V", "(amount / volume)").replace("a/v", "(amount / volume)")
+            if operator_name == "std":
+                func = "ts_std"
+            else:
+                func = "ts_mean"
+            replacement = f"{func}({mapped_field},{window})"
+            suffix_end = arg_end + 1
+            if result[suffix_end:suffix_end + 2] == "_t":
+                suffix_end += 2
+            result = result[:match.start()] + replacement + result[suffix_end:]
+        return result
 
     def _replace_latex_frac(self, expression: str) -> str:
         result = expression
@@ -953,6 +1085,24 @@ class RDAgentFactorMiningService:
 
     def _replace_latex_sums(self, expression: str) -> str:
         result = str(expression or "")
+        field_aliases = {
+            "c": "close",
+            "o": "open",
+            "h": "high",
+            "l": "low",
+            "v": "volume",
+            "amt": "amount",
+            "a": "amount",
+            "r": "returns",
+            "close": "close",
+            "open": "open",
+            "high": "high",
+            "low": "low",
+            "volume": "volume",
+            "amount": "amount",
+            "return": "returns",
+            "returns": "returns",
+        }
         sum_pattern = re.compile(
             r"\\sum_\{i=1\}\^\{(\d+)\}\s*([A-Za-z_][A-Za-z0-9_]*)_\{t-i\}",
             flags=re.IGNORECASE,
@@ -962,9 +1112,164 @@ class RDAgentFactorMiningService:
             if not match:
                 break
             window = match.group(1)
-            field = match.group(2).lower()
+            field = field_aliases.get(match.group(2).lower(), match.group(2).lower())
             replacement = f"ts_sum({field},{window})"
             result = result[:match.start()] + replacement + result[match.end():]
+        sum_pattern_zero = re.compile(
+            r"\\sum_\{i=0\}\^\{(\d+)\}\s*([A-Za-z_][A-Za-z0-9_]*)_\{t-i\}",
+            flags=re.IGNORECASE,
+        )
+        while True:
+            match = sum_pattern_zero.search(result)
+            if not match:
+                break
+            window = int(match.group(1)) + 1
+            field = field_aliases.get(match.group(2).lower(), match.group(2).lower())
+            replacement = f"ts_sum({field},{window})"
+            result = result[:match.start()] + replacement + result[match.end():]
+        return result
+
+    def _replace_reference_sum_averages(self, expression: str) -> str:
+        result = str(expression or "")
+
+        # 1/N * sum_{i=0}^{N-1} field_{t-i} -> ts_mean(field, N)
+        avg_field_pattern = re.compile(
+            r"\\frac\s*\{\s*1\s*\}\s*\{\s*(\d+)\s*\}\s*\\sum_\{i=0\}\^\{(\d+)\}\s*([A-Za-z_][A-Za-z0-9_]*)_\{t-i\}",
+            flags=re.IGNORECASE,
+        )
+        field_aliases = {
+            "c": "close",
+            "v": "volume",
+            "a": "amount",
+            "close": "close",
+            "volume": "volume",
+            "amount": "amount",
+        }
+        while True:
+            match = avg_field_pattern.search(result)
+            if not match:
+                break
+            denom = int(match.group(1))
+            upper = int(match.group(2))
+            field = field_aliases.get(match.group(3).lower(), match.group(3).lower())
+            window = upper + 1
+            if denom == window:
+                replacement = f"ts_mean({field},{window})"
+            else:
+                replacement = f"(((1) / ({denom})) * ts_sum({field},{window}))"
+            result = result[:match.start()] + replacement + result[match.end():]
+
+        avg_field_symbolic_pattern = re.compile(
+            r"\\frac\s*\{\s*1\s*\}\s*\{\s*(\d+)\s*\}\s*\\sum_\{i=0\}\^\{(\d+)-1\}\s*([A-Za-z_][A-Za-z0-9_]*)_\{t-i\}",
+            flags=re.IGNORECASE,
+        )
+        while True:
+            match = avg_field_symbolic_pattern.search(result)
+            if not match:
+                break
+            denom = int(match.group(1))
+            upper_base = int(match.group(2))
+            field = field_aliases.get(match.group(3).lower(), match.group(3).lower())
+            window = upper_base
+            if denom == window:
+                replacement = f"ts_mean({field},{window})"
+            else:
+                replacement = f"(((1) / ({denom})) * ts_sum({field},{window}))"
+            result = result[:match.start()] + replacement + result[match.end():]
+
+        avg_field_expanded_pattern = re.compile(
+            r"\\frac\s*\{\s*1\s*\}\s*\{\s*(\d+)\s*\}\s*\\sum_\{i=0\}\^\{(\d+)\}\s*([A-Za-z_][A-Za-z0-9_]*)_\{t-0\}",
+            flags=re.IGNORECASE,
+        )
+        while True:
+            match = avg_field_expanded_pattern.search(result)
+            if not match:
+                break
+            denom = int(match.group(1))
+            upper = int(match.group(2))
+            field = field_aliases.get(match.group(3).lower(), match.group(3).lower())
+            window = upper + 1
+            if denom == window:
+                replacement = f"ts_mean({field},{window})"
+            else:
+                replacement = f"(((1) / ({denom})) * ts_sum({field},{window}))"
+            result = result[:match.start()] + replacement + result[match.end():]
+
+        # 1/N * sum_{i=0}^{N-1} (expr_{t-i}) -> ts_mean(expr, N) for amount/volume style ratio
+        avg_ratio_pattern = re.compile(
+            r"\\frac\s*\{\s*1\s*\}\s*\{\s*(\d+)\s*\}\s*\\sum_\{i=0\}\^\{(\d+)\}\s*"
+            r"(?:\\left\(|\()\s*\\frac\{([A-Za-z_][A-Za-z0-9_]*)_\{t-(?:i|0)\}\}\{([A-Za-z_][A-Za-z0-9_]*)_\{t-(?:i|0)\}\}\s*(?:\\right\)|\))",
+            flags=re.IGNORECASE,
+        )
+        while True:
+            match = avg_ratio_pattern.search(result)
+            if not match:
+                break
+            denom = int(match.group(1))
+            upper = int(match.group(2))
+            numerator_field = field_aliases.get(match.group(3).lower(), match.group(3).lower())
+            denominator_field = field_aliases.get(match.group(4).lower(), match.group(4).lower())
+            window = upper + 1
+            base_expr = f"(({numerator_field}) / ({denominator_field}))"
+            if denom == window:
+                replacement = f"ts_mean({base_expr},{window})"
+            else:
+                replacement = f"(((1) / ({denom})) * ts_sum({base_expr},{window}))"
+            result = result[:match.start()] + replacement + result[match.end():]
+
+        avg_ratio_symbolic_pattern = re.compile(
+            r"\\frac\s*\{\s*1\s*\}\s*\{\s*(\d+)\s*\}\s*\\sum_\{i=0\}\^\{(\d+)-1\}\s*"
+            r"(?:\\left\(|\()\s*\\frac\{([A-Za-z_][A-Za-z0-9_]*)_\{t-(?:i|0)\}\}\{([A-Za-z_][A-Za-z0-9_]*)_\{t-(?:i|0)\}\}\s*(?:\\right\)|\))",
+            flags=re.IGNORECASE,
+        )
+        while True:
+            match = avg_ratio_symbolic_pattern.search(result)
+            if not match:
+                break
+            denom = int(match.group(1))
+            upper_base = int(match.group(2))
+            numerator_field = field_aliases.get(match.group(3).lower(), match.group(3).lower())
+            denominator_field = field_aliases.get(match.group(4).lower(), match.group(4).lower())
+            window = upper_base
+            base_expr = f"(({numerator_field}) / ({denominator_field}))"
+            if denom == window:
+                replacement = f"ts_mean({base_expr},{window})"
+            else:
+                replacement = f"(((1) / ({denom})) * ts_sum({base_expr},{window}))"
+            result = result[:match.start()] + replacement + result[match.end():]
+
+        return result
+
+    def _replace_reference_volatility_term(self, expression: str) -> str:
+        result = str(expression or "")
+        volatility_pattern = re.compile(
+            r"\\sqrt\s*\{\s*\\frac\s*\{\s*1\s*\}\s*\{\s*(\d+)\s*\}\s*"
+            r"\\sum_\{i=1\}\^\{\1\}\s*"
+            r"\(?\s*r_\{t-i\+1\}\s*-\s*\\bar\s*r_t\s*\)?\s*\^2\s*\}",
+            flags=re.IGNORECASE,
+        )
+        while True:
+            match = volatility_pattern.search(result)
+            if not match:
+                break
+            window = match.group(1)
+            replacement = f"ts_std(returns,{window})"
+            result = result[:match.start()] + replacement + result[match.end():]
+        return result
+
+    def _replace_latex_sqrt(self, expression: str) -> str:
+        result = str(expression or "")
+        while "\\sqrt" in result:
+            match = re.search(r"\\sqrt\s*\{", result)
+            if not match:
+                break
+            inner_start = match.end() - 1
+            inner_end = self._find_matching_brace(result, inner_start)
+            if inner_end == -1:
+                break
+            inner = result[inner_start + 1:inner_end]
+            replacement = f"sqrt({inner})"
+            result = result[:match.start()] + replacement + result[inner_end + 1:]
         return result
 
     @staticmethod
@@ -982,6 +1287,38 @@ class RDAgentFactorMiningService:
                     return index
         return -1
 
+    @staticmethod
+    def _find_matching_parenthesis(text: str, start: int) -> int:
+        if start < 0 or start >= len(text) or text[start] != "(":
+            return -1
+        depth = 0
+        for index in range(start, len(text)):
+            char = text[index]
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    return index
+        return -1
+
+    @staticmethod
+    def _find_top_level_equal(text: str) -> int:
+        paren_depth = 0
+        brace_depth = 0
+        for index, char in enumerate(str(text or "")):
+            if char == "(":
+                paren_depth += 1
+            elif char == ")":
+                paren_depth = max(paren_depth - 1, 0)
+            elif char == "{":
+                brace_depth += 1
+            elif char == "}":
+                brace_depth = max(brace_depth - 1, 0)
+            elif char == "=" and paren_depth == 0 and brace_depth == 0:
+                return index
+        return -1
+
     def _replace_latex_tokens(self, expression: str) -> str:
         result = str(expression or "")
         field_aliases = {
@@ -992,17 +1329,26 @@ class RDAgentFactorMiningService:
             "v": "volume",
             "amt": "amount",
             "a": "amount",
+            "r": "returns",
             "close": "close",
             "open": "open",
             "high": "high",
             "low": "low",
             "volume": "volume",
             "amount": "amount",
+            "return": "returns",
+            "returns": "returns",
         }
         for token, field in sorted(field_aliases.items(), key=lambda item: len(item[0]), reverse=True):
             result = re.sub(
                 rf"\b{token}_\{{t-(\d+)\}}",
                 lambda match, field_name=field: f"ts_shift({field_name},{match.group(1)})",
+                result,
+                flags=re.IGNORECASE,
+            )
+            result = re.sub(
+                rf"\b{token}_\{{t-i\+1\}}",
+                lambda match, field_name=field: f"ts_shift({field_name},i-1)",
                 result,
                 flags=re.IGNORECASE,
             )
@@ -1020,6 +1366,7 @@ class RDAgentFactorMiningService:
                 flags=re.IGNORECASE,
             )
 
+        result = re.sub(r"\\bar\s*r_t", "ts_mean(returns,20)", result, flags=re.IGNORECASE)
         result = result.replace("{", "(").replace("}", ")")
         result = result.replace("^", "**")
         return result
