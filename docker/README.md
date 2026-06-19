@@ -26,6 +26,21 @@ docker-compose logs -f
 docker-compose down
 ```
 
+## Deploy To SunHome
+
+Use the helper script from the project root:
+
+```bash
+./scripts/deploy_sunhome.sh
+```
+
+Optional environment variables:
+
+```bash
+REMOTE_HOST=sunhome
+REMOTE_DIR=~/apps/factorhub-v3
+```
+
 ## Access URLs
 
 | Service | URL |

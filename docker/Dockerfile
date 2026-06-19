@@ -1,14 +1,14 @@
 # ============================================
 # Stage 1: Frontend Build
 # ============================================
-FROM node:24-alpine AS frontend-builder
+FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/node:22-alpine AS frontend-builder
 
 # Install pnpm
 RUN npm install -g pnpm
 
 WORKDIR /app/frontend
 
-COPY frontend/react-antd/package.json frontend/react-antd/pnpm-lock.yaml ./
+COPY frontend/react-antd/package.json frontend/react-antd/pnpm-lock.yaml frontend/react-antd/.npmrc frontend/react-antd/pnpm-workspace.yaml ./
 
 # Install dependencies
 RUN pnpm install --frozen-lockfile || pnpm install
@@ -22,12 +22,12 @@ RUN pnpm vite build
 # ============================================
 # Stage 2: Backend Runtime
 # ============================================
-FROM python:3.11-slim-bookworm AS backend
+FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/python:3.12-slim AS backend
 
 ARG TALIB_C_VERSION="0.6.4"
 
 # Install system dependencies and TA-Lib C library in one layer
-RUN apt-get update && apt-get upgrade -y && \
+RUN apt-get update && \
     apt-get install -y --no-install-recommends build-essential wget curl && \
     \
     # 根据架构选择 ta-lib 安装方式
