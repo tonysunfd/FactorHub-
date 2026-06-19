@@ -14,7 +14,7 @@ export type BackendControlResponse = {
 const backendPort = String(import.meta.env.VITE_BACKEND_PORT || '8001')
 
 const resolveBackendControlBase = () => {
-  if (typeof window === 'undefined') {
+  if (typeof window === 'undefined' || !import.meta.env.DEV) {
     return 'http://127.0.0.1:5173'
   }
   const host = window.location.hostname || '127.0.0.1'
@@ -25,8 +25,11 @@ export const resolveBackendBaseUrl = () => {
   if (typeof window === 'undefined') {
     return `http://127.0.0.1:${backendPort}`
   }
-  const host = window.location.hostname || '127.0.0.1'
-  return `${window.location.protocol}//${host}:${backendPort}`
+  if (import.meta.env.DEV) {
+    const host = window.location.hostname || '127.0.0.1'
+    return `${window.location.protocol}//${host}:${backendPort}`
+  }
+  return window.location.origin
 }
 
 const resolveBackendHealthUrl = () => {
@@ -34,6 +37,9 @@ const resolveBackendHealthUrl = () => {
 }
 
 export async function requestBackendControl<T>(path: string, method: 'GET' | 'POST' = 'POST'): Promise<T> {
+  if (!import.meta.env.DEV) {
+    throw new Error('生产环境不支持通过前端控制后端进程')
+  }
   const response = await fetch(`${resolveBackendControlBase()}/__factorhub_backend/${path}`, {
     method,
     cache: 'no-store'
@@ -56,6 +62,10 @@ export async function getBackendStatus(): Promise<BackendStatus> {
     }
   } catch {
     // ignore and fall through to control-plane status
+  }
+
+  if (!import.meta.env.DEV) {
+    return 'offline'
   }
 
   try {

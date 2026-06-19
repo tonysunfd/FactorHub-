@@ -39,8 +39,11 @@ const resolveApiBaseUrl = () => {
   if (typeof window === 'undefined') {
     return `http://127.0.0.1:${backendPort}/api`
   }
-  const host = window.location.hostname || '127.0.0.1'
-  return `${window.location.protocol}//${host}:${backendPort}/api`
+  if (import.meta.env.DEV) {
+    const host = window.location.hostname || '127.0.0.1'
+    return `${window.location.protocol}//${host}:${backendPort}/api`
+  }
+  return new URL('/api', window.location.origin).toString()
 }
 
 const request = axios.create({

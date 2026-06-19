@@ -239,23 +239,13 @@ export default defineConfig({
         manualChunks(id) {
           if (!id.includes('node_modules')) return undefined
 
-          if (id.includes('/react/') || id.includes('/react-dom/') || id.includes('/react-router-dom/')) {
-            return 'vendor-react'
-          }
-          if (id.includes('/antd/') || id.includes('/@ant-design/') || id.includes('/rc-')) {
-            return 'vendor-antd'
-          }
           if (id.includes('/echarts/')) {
             return 'vendor-echarts'
           }
           if (id.includes('/highlight.js/') || id.includes('/react-simple-code-editor/')) {
             return 'vendor-editor'
           }
-          if (id.includes('/dayjs/') || id.includes('/axios/')) {
-            return 'vendor-utils'
-          }
-
-          return 'vendor-misc'
+          return undefined
         }
       }
     }
