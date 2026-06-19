@@ -436,13 +436,17 @@ class RDAgentFactorMiningService:
         )
         base_factors = list(current_base_factors)
         if not base_factors:
-            selection = self._auto_mining_service.select_factors(
-                prompt=f"{config.objective} {hypothesis.get('research_direction') or ''}".strip(),
-                max_factor_count=max(int(config.candidates_per_iteration or 1), 1),
-                candidate_limit=40,
-                selection_mode="auto",
-            )
-            base_factors = selection.get("selected_factors", [])
+            try:
+                selection = self._auto_mining_service.select_factors(
+                    prompt=f"{config.objective} {hypothesis.get('research_direction') or ''}".strip(),
+                    max_factor_count=max(int(config.candidates_per_iteration or 1), 1),
+                    candidate_limit=40,
+                    selection_mode="auto",
+                )
+                base_factors = selection.get("selected_factors", [])
+            except Exception as exc:
+                logger.warning("RDAgent 基础因子筛选失败，回退为空基础因子继续执行：%s", exc)
+                base_factors = []
         return {
             "round_index": iteration,
             "candidate_limit": max(int(config.candidates_per_iteration or 1), 1),

@@ -4,7 +4,9 @@ LLM 配置服务。
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 from typing import Any
 
 from backend.core.settings import settings
@@ -22,6 +24,37 @@ class LLMConfigService:
             "base_url": "https://api.deepseek.com/v1",
             "model": "deepseek-chat",
         }
+
+    @staticmethod
+    def _running_in_container() -> bool:
+        return Path("/.dockerenv").exists() or os.getenv("FACTORHUB_RUNNING_IN_CONTAINER") == "1"
+
+    def _normalize_runtime_base_url(self, base_url: str) -> str:
+        normalized = str(base_url or "").strip()
+        if not normalized:
+            return normalized
+        if not self._running_in_container():
+            return normalized
+
+        try:
+            parsed = urlsplit(normalized)
+        except Exception:
+            return normalized
+
+        hostname = (parsed.hostname or "").strip().lower()
+        if hostname not in {"127.0.0.1", "localhost"}:
+            return normalized
+
+        replacement_host = os.getenv("FACTORHUB_CONTAINER_HOST_GATEWAY", "host.docker.internal").strip() or "host.docker.internal"
+        netloc = replacement_host
+        if parsed.port:
+            netloc = f"{replacement_host}:{parsed.port}"
+        if parsed.username:
+            userinfo = parsed.username
+            if parsed.password:
+                userinfo = f"{userinfo}:{parsed.password}"
+            netloc = f"{userinfo}@{netloc}"
+        return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
 
     def load_raw_config(self) -> dict[str, Any]:
         if not self.config_path.exists():
@@ -65,7 +98,9 @@ class LLMConfigService:
         return self.get_public_config()
 
     def get_runtime_config(self) -> dict[str, Any]:
-        return self.load_raw_config()
+        config = self.load_raw_config()
+        config["base_url"] = self._normalize_runtime_base_url(str(config.get("base_url") or ""))
+        return config
 
     def get_public_config(self) -> dict[str, Any]:
         config = self.load_raw_config()
