@@ -189,6 +189,19 @@ pnpm dev
 # Frontend available at http://localhost:5173
 ```
 
+### Docker Deployment To Tailscale SunHome
+
+```bash
+./scripts/deploy_sunhome.sh
+```
+
+Default target:
+
+- `physnowhere@100.73.5.96`
+- Remote directory: `~/apps/factorhub-v3`
+
+This deployment flow uses the Tailscale address directly and does not depend on a local `sunhome` hostname mapping.
+
 ---
 
 ## License

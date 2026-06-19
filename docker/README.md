@@ -37,9 +37,15 @@ Use the helper script from the project root:
 Optional environment variables:
 
 ```bash
-REMOTE_HOST=sunhome
+REMOTE_HOST=physnowhere@100.73.5.96
 REMOTE_DIR=~/apps/factorhub-v3
+SSH_OPTS="-o StrictHostKeyChecking=accept-new"
 ```
+
+Note:
+
+- The default target uses the Tailscale address of `sunhome`
+- It does not rely on local LAN DNS, `/etc/hosts`, or a custom hostname alias
 
 ## Access URLs
 

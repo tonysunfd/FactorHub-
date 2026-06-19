@@ -520,6 +520,19 @@ pnpm dev
 
 前端将在 http://localhost:5173 启动
 
+### 部署到 Tailscale 版 SunHome
+
+```bash
+./scripts/deploy_sunhome.sh
+```
+
+默认目标：
+
+- `physnowhere@100.73.5.96`
+- 远端目录：`~/apps/factorhub-v3`
+
+这个部署流程直接使用 Tailscale 地址，不依赖本地 `sunhome` 主机名解析。
+
 ### 访问应用
 
 启动成功后，访问：
