@@ -63,9 +63,13 @@ nul
 skills
 
 logs/
+log/
 vite-app/
 vite-naive-ui/
 config/llm_config.json
 data/reports/auto_mining/
+.venv-rdagent/
+factorflow.db
+git_ignore_folder/
 
 CLAUDE.md
