@@ -51,7 +51,7 @@ def _include_routers(app: FastAPI) -> None:
     app.include_router(paper_factors.router, prefix="/api/paper-factors", tags=["论文因子"])
     app.include_router(research_tools.router, prefix="/api/research-tools", tags=["研究工具"])
     app.include_router(wqbrain.router, prefix="/api/wqbrain", tags=["WQ BRAIN"])
-    app.include_router(kronos.router, prefix="/kronos-ui", tags=["Kronos 预测"])
+    app.include_router(kronos.router, prefix="/api/kronos", tags=["Kronos 集成 API"])
     app.include_router(kronos_proxy.router, prefix="/kronos-ui", tags=["Kronos WebUI Proxy"])
 
 
