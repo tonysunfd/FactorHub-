@@ -683,7 +683,7 @@
         // Load available models
         async function loadAvailableModels() {
             try {
-                const response = await axios.get('/api/available-models');
+                const response = await axios.get('./api/available-models');
                 if (response.data.model_available) {
                     availableModels = response.data.models;
                     populateModelSelect();
@@ -725,7 +725,7 @@
                 showLoading(true);
                 document.getElementById('load-model-btn').disabled = true;
                 
-                const response = await axios.post('/api/load-model', {
+                const response = await axios.post('./api/load-model', {
                     model_key: modelKey,
                     device: device
                 });
@@ -751,7 +751,7 @@
         // Update model status
         async function updateModelStatus() {
             try {
-                const response = await axios.get('/api/model-status');
+                const response = await axios.get('./api/model-status');
                 const status = response.data;
                 
                 if (status.loaded) {
@@ -769,7 +769,7 @@
         // Load data file list
         async function loadDataFiles() {
             try {
-                const response = await axios.get('/api/data-files');
+                const response = await axios.get('./api/data-files');
                 const dataFiles = response.data;
                 
                 const dataFileSelect = document.getElementById('data-file-select');
@@ -816,7 +816,7 @@
                     end_date: sourceEndDate
                 };
                 
-                const response = await axios.post('/api/load-data', requestPayload);
+                const response = await axios.post('./api/load-data', requestPayload);
                 
                 if (response.data.success) {
                     currentDataFile = filePath;
@@ -1113,7 +1113,7 @@
                 
                 console.log('🚀 Starting prediction, parameters:', predictionParams);
                 
-                const response = await axios.post('/api/predict', predictionParams);
+                const response = await axios.post('./api/predict', predictionParams);
                 
                 if (response.data.success) {
                     // Display prediction results
