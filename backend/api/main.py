@@ -37,6 +37,8 @@ def _include_routers(app: FastAPI) -> None:
     paper_factors = importlib.import_module("backend.api.routers.paper_factors")
     research_tools = importlib.import_module("backend.api.routers.research_tools")
     wqbrain = importlib.import_module("backend.api.routers.wqbrain")
+    kronos = importlib.import_module("backend.api.routers.kronos")
+    kronos_proxy = importlib.import_module("backend.api.routers.kronos_proxy")
 
     app.include_router(factors.router, prefix="/api/factors", tags=["因子管理"])
     app.include_router(analysis.router, prefix="/api/analysis", tags=["因子分析"])
@@ -49,6 +51,8 @@ def _include_routers(app: FastAPI) -> None:
     app.include_router(paper_factors.router, prefix="/api/paper-factors", tags=["论文因子"])
     app.include_router(research_tools.router, prefix="/api/research-tools", tags=["研究工具"])
     app.include_router(wqbrain.router, prefix="/api/wqbrain", tags=["WQ BRAIN"])
+    app.include_router(kronos.router, prefix="/kronos-ui", tags=["Kronos 预测"])
+    app.include_router(kronos_proxy.router, prefix="/kronos-ui", tags=["Kronos WebUI Proxy"])
 
 
 def _load_preset_factors_sync() -> None:

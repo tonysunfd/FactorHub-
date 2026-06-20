@@ -4,6 +4,16 @@ export { resolveApiUrl } from './url'
 type QueryParams = Record<string, string | number | boolean | null | undefined>
 type JsonObject = Record<string, unknown>
 
+type KronosLoadDataRequest = {
+  source_type: 'factorhub_stock' | 'factorhub_universe' | 'local_file'
+  stock_code?: string
+  universe?: string
+  as_of_date?: string
+  start_date?: string
+  end_date?: string
+  file_path?: string
+}
+
 type RDAgentMiningRequest = {
   objective: string
   candidate_universe: string[]
@@ -459,6 +469,38 @@ export const api = {
 
   deleteMiningHistory(historyId: number) {
     return request.delete(`/mining/history/${historyId}`, { timeout: 120000 })
+  },
+
+  getKronosRuntimeStatus() {
+    return request.get('/../kronos-ui/api/runtime-status', { timeout: 120000 })
+  },
+
+  listKronosDataFiles() {
+    return request.get('/../kronos-ui/api/data-files', { timeout: 120000 })
+  },
+
+  loadKronosData(data: KronosLoadDataRequest) {
+    return request.post('/../kronos-ui/api/load-data', data, { timeout: 120000 })
+  },
+
+  startKronosPredictTask(data: JsonObject) {
+    return request.post('/../kronos-ui/api/tasks/predict', data, { timeout: 120000 })
+  },
+
+  startKronosBatchPredictTask(data: JsonObject) {
+    return request.post('/../kronos-ui/api/tasks/batch-predict', data, { timeout: 120000 })
+  },
+
+  startKronosBatchBacktestTask(data: {
+    prediction_task_id: string
+    start_date: string
+    end_date: string
+  }) {
+    return request.post('/../kronos-ui/api/tasks/batch-backtest', data, { timeout: 120000 })
+  },
+
+  getKronosTask(taskId: string) {
+    return request.get(`/../kronos-ui/api/tasks/${taskId}`, { timeout: 120000 })
   },
 
   startRDAgentMining(data: RDAgentMiningRequest) {

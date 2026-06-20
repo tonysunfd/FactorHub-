@@ -100,7 +100,7 @@ const buildLlmSelectionEvidence = (payload?: Record<string, any> | null) => {
   };
 };
 
-type MiningMode = "manual" | "auto" | "rdagent" | "history";
+type MiningMode = "manual" | "auto" | "rdagent" | "kronos" | "history";
 type RDAgentBootstrapMode = "manual" | "llm_auto";
 type PersistedMiningTaskKind = "genetic" | "auto" | "auto_campaign" | "auto_continue";
 
@@ -3149,6 +3149,13 @@ const FactorMining: React.FC = () => {
     return resolveApiUrl(url);
   };
 
+  const getKronosUiUrl = () => {
+    if (typeof window === "undefined") {
+      return "/kronos-ui/";
+    }
+    return new URL("/kronos-ui/", window.location.origin).toString();
+  };
+
   const getRDAgentStageLabel = (upstreamStatus?: string) => {
     const status = String(upstreamStatus || "");
     if (status.includes("cli_starting")) return "内部 RDAgent Loop 启动";
@@ -5465,6 +5472,46 @@ const FactorMining: React.FC = () => {
     );
   };
 
+  const renderKronosTab = () => (
+    <Row gutter={[24, 24]}>
+      <Col span={24}>
+        <Card
+          title="Kronos 预测"
+          className="result-card"
+          extra={(
+            <Space>
+              <Button onClick={() => window.open(getKronosUiUrl(), "_blank")}>新窗口打开</Button>
+              <Button type="primary" onClick={() => setActiveTab("kronos" as MiningMode)}>刷新当前页签</Button>
+            </Space>
+          )}
+        >
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message="当前页签直接复用原生 Kronos WebUI"
+            description="本页面通过 iframe 内嵌独立运行的 Kronos 服务，保留原生交互能力，并与 Factorhub 数据源、异步任务队列及回测联动打通。"
+          />
+          <div
+            style={{
+              borderRadius: 18,
+              overflow: "hidden",
+              border: "1px solid rgba(148, 163, 184, 0.25)",
+              boxShadow: "0 18px 40px rgba(15, 23, 42, 0.10)",
+              background: "#ffffff",
+            }}
+          >
+            <iframe
+              title="Kronos 预测"
+              src={getKronosUiUrl()}
+              style={{ width: "100%", height: "calc(100vh - 240px)", minHeight: 900, border: "none" }}
+            />
+          </div>
+        </Card>
+      </Col>
+    </Row>
+  );
+
   return (
     <div className="factor-mining-container">
       <div className="bg-gradient" />
@@ -5938,6 +5985,11 @@ const FactorMining: React.FC = () => {
             key: "rdagent",
             label: "RDAgent 挖掘",
             children: renderRDAgentMiningTab(),
+          },
+          {
+            key: "kronos",
+            label: "Kronos 预测",
+            children: renderKronosTab(),
           },
           {
             key: "history",

@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "factor-flow"
 version = "0.1.0"
@@ -23,8 +27,13 @@ dependencies = [
     "statsmodels>=0.14.0", # 统计分析
     "shap>=0.42.0", # SHAP模型解释库
     "fastapi>=0.135.1",
+    "flask>=3.0.0",
+    "flask-cors>=4.0.0",
     "python-multipart>=0.0.20",
     "uvicorn>=0.41.0",
+    "httpx>=0.28.0",
+    "redis>=5.2.0",
+    "rq>=1.16.2",
     "openai>=1.54.0",
     "quantstats>=0.0.81",
 ]
@@ -43,3 +52,9 @@ dev-dependencies = [
 [[tool.uv.index]]
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 default = true
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["backend*", "kronos_webui*"]

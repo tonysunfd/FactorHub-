@@ -1,5 +1,4 @@
 services:
-  # FactorFlow service (FastAPI + frontend static files)
   factorflow:
     build:
       context: ..
@@ -9,11 +8,8 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # Persistent data directory
       - ../data:/app/data
-      # Persistent app config (LLM config, runtime settings)
       - ../config:/app/config
-      # Persistent logs
       - ../logs:/app/logs
     environment:
       - PYTHONUNBUFFERED=1
@@ -21,8 +17,15 @@ services:
       - FACTORHUB_RELOAD=0
       - FACTORHUB_RUNNING_IN_CONTAINER=1
       - FACTORHUB_CONTAINER_HOST_GATEWAY=host.docker.internal
+      - REDIS_URL=redis://redis:6379/0
+      - KRONOS_UI_SERVICE_URL=http://kronos-webui:7070
+      - KRONOS_DEFAULT_DEVICE=cpu
+      - KRONOS_DEFAULT_MODEL=kronos-base
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      - redis
+      - kronos-webui
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
@@ -30,3 +33,54 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+
+  kronos-webui:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: backend
+    container_name: kronos-webui
+    command: ["python", "-m", "kronos_webui.app"]
+    expose:
+      - "7070"
+    volumes:
+      - ../data:/app/data
+      - ../config:/app/config
+      - ../logs:/app/logs
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=Asia/Shanghai
+      - REDIS_URL=redis://redis:6379/0
+      - KRONOS_DEFAULT_DEVICE=cpu
+      - KRONOS_DEFAULT_MODEL=kronos-base
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  kronos-worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: backend
+    container_name: kronos-worker
+    command: ["python", "start_kronos_worker.py"]
+    volumes:
+      - ../data:/app/data
+      - ../config:/app/config
+      - ../logs:/app/logs
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=Asia/Shanghai
+      - REDIS_URL=redis://redis:6379/0
+      - KRONOS_DEFAULT_DEVICE=cpu
+      - KRONOS_DEFAULT_MODEL=kronos-base
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  redis:
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/redis:7-alpine
+    container_name: factorhub-redis
+    expose:
+      - "6379"
+    restart: unless-stopped

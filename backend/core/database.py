@@ -35,6 +35,11 @@ def init_db() -> None:
     from backend.models.cache_metadata import CacheMetadataModel
     from backend.models.factor_version import FactorVersionModel
     from backend.models.mining_history import MiningHistoryModel
+    from backend.models.kronos_task import (
+        KronosTaskModel,
+        KronosPredictionRunModel,
+        KronosPredictionItemModel,
+    )
 
     Base.metadata.create_all(bind=engine)
     _ensure_schema_compatibility()

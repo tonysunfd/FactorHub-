@@ -78,9 +78,11 @@ RUN uv pip install --system --no-cache .
 
 # Copy backend code
 COPY backend/ ./backend/
+COPY kronos_webui/ ./kronos_webui/
 COPY config/ ./config/
 COPY data/ ./data/
 COPY start_api.py ./
+COPY start_kronos_worker.py ./
 
 # Copy frontend build artifacts (for FastAPI static file serving)
 COPY --from=frontend-builder /app/frontend/dist ./frontend/react-antd/dist

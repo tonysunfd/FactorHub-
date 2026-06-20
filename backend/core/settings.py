@@ -28,6 +28,17 @@ class Settings(BaseSettings):
     # 数据库配置
     DATABASE_URL: str = f"sqlite:///{DB_DIR}/factorflow.db"
 
+    # Kronos / 队列配置
+    KRONOS_UI_BASE_PATH: str = "/kronos-ui"
+    KRONOS_UI_SERVICE_URL: str = "http://kronos-webui:7070"
+    KRONOS_UI_PUBLIC_URL: str = "/kronos-ui/"
+    KRONOS_RESULTS_DIR: Path = DATA_DIR / "kronos"
+    KRONOS_DEFAULT_MODEL: str = "kronos-base"
+    KRONOS_DEFAULT_DEVICE: str = "cpu"
+    KRONOS_ENABLE_LOCAL_FILES: bool = True
+    REDIS_URL: str = "redis://redis:6379/0"
+    KRONOS_QUEUE_NAME: str = "kronos"
+
     # akshare 配置
     AKSHARE_CACHE_ENABLED: bool = True
     AKSHARE_CACHE_DIR: Path = CACHE_DIR / "akshare"
@@ -63,6 +74,7 @@ class Settings(BaseSettings):
         self.CACHE_DIR.mkdir(parents=True, exist_ok=True)
         self.DB_DIR.mkdir(parents=True, exist_ok=True)
         self.REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        self.KRONOS_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
         self.AKSHARE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         self.DATA_UNIVERSE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         self.DATA_BENCHMARK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
