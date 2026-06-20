@@ -34,7 +34,7 @@ class KronosQueueService:
 
     def enqueue(self, func_path: str, *args, job_id: str | None = None, **kwargs):
         handle = self.get_handle()
-        return handle.queue.enqueue(func_path, args=args, kwargs=kwargs, job_id=job_id)
+        return handle.queue.enqueue_call(func_path, args=args, kwargs=kwargs, job_id=job_id)
 
     def ping(self) -> bool:
         try:
