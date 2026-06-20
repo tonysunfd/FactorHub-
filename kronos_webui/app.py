@@ -69,6 +69,39 @@ def _scan_local_files() -> list[dict[str, Any]]:
     return data_files
 
 
+def _build_data_info(df: pd.DataFrame) -> dict[str, Any]:
+    return {
+        "rows": len(df),
+        "columns": list(df.columns),
+        "start_date": df["timestamps"].min().isoformat(),
+        "end_date": df["timestamps"].max().isoformat(),
+        "price_range": {
+            "min": float(df[["open", "high", "low", "close"]].min().min()),
+            "max": float(df[["open", "high", "low", "close"]].max().max()),
+        },
+        "prediction_columns": ["open", "high", "low", "close", "volume"],
+        "timeframe": detect_timeframe(df),
+    }
+
+
+def _load_factorhub_stock(stock_code: str, start_date: str, end_date: str):
+    prepared = kronos_task_service.load_dataset(
+        {
+            "source_type": "factorhub_stock",
+            "stock_code": stock_code,
+            "start_date": start_date,
+            "end_date": end_date,
+        }
+    )
+    if prepared.dataframe is None or prepared.dataframe.empty:
+        return None, "No data returned from Factorhub"
+
+    df = prepared.dataframe.copy()
+    df = df.rename(columns={"date": "timestamps"})
+    df["timestamps"] = pd.to_datetime(df["timestamps"])
+    return df[["timestamps", "open", "high", "low", "close", "volume", "amount"]], None
+
+
 def load_data_file(file_path: str):
     """兼容上游原生 WebUI 的本地文件加载逻辑。"""
     path = Path(file_path)
@@ -299,32 +332,41 @@ def get_model_status():
 
 @app.route("/api/data-files")
 def get_data_files():
-    return jsonify(_scan_local_files())
+    return jsonify(
+        [
+            {
+                "name": "Factorhub Single Stock",
+                "path": "__factorhub_stock__",
+                "size": "Live data source",
+                "source_type": "factorhub_stock",
+            },
+            *_scan_local_files(),
+        ]
+    )
 
 
 @app.route("/api/load-data", methods=["POST"])
 def load_data():
     data = request.get_json(silent=True) or {}
     file_path = data.get("file_path")
-    if not file_path:
-        return jsonify({"error": "File path cannot be empty"}), 400
+    source_type = data.get("source_type", "local_file")
 
-    df, error = load_data_file(file_path)
+    if source_type == "factorhub_stock" or file_path == "__factorhub_stock__":
+        stock_code = str(data.get("stock_code", "")).strip()
+        start_date = str(data.get("start_date", "")).strip()
+        end_date = str(data.get("end_date", "")).strip()
+        if not stock_code or not start_date or not end_date:
+            return jsonify({"error": "stock_code, start_date, end_date are required for Factorhub stock source"}), 400
+        df, error = _load_factorhub_stock(stock_code, start_date, end_date)
+    else:
+        if not file_path:
+            return jsonify({"error": "File path cannot be empty"}), 400
+        df, error = load_data_file(file_path)
+
     if error:
         return jsonify({"error": error}), 400
 
-    data_info = {
-        "rows": len(df),
-        "columns": list(df.columns),
-        "start_date": df["timestamps"].min().isoformat(),
-        "end_date": df["timestamps"].max().isoformat(),
-        "price_range": {
-            "min": float(df[["open", "high", "low", "close"]].min().min()),
-            "max": float(df[["open", "high", "low", "close"]].max().max()),
-        },
-        "prediction_columns": ["open", "high", "low", "close", "volume"],
-        "timeframe": detect_timeframe(df),
-    }
+    data_info = _build_data_info(df)
     return jsonify(
         {
             "success": True,
@@ -341,14 +383,22 @@ def predict():
 
     data = request.get_json(silent=True) or {}
     file_path = data.get("file_path")
+    source_type = data.get("source_type", "local_file")
     lookback = int(data.get("lookback", 400))
     pred_len = int(data.get("pred_len", 120))
     start_date = data.get("start_date")
 
-    if not file_path:
-        return jsonify({"error": "File path cannot be empty"}), 400
+    if source_type == "factorhub_stock" or file_path == "__factorhub_stock__":
+        stock_code = str(data.get("stock_code", "")).strip()
+        end_date = str(data.get("end_date", "")).strip()
+        if not stock_code or not start_date or not end_date:
+            return jsonify({"error": "stock_code, start_date, end_date are required for Factorhub stock source"}), 400
+        df, error = _load_factorhub_stock(stock_code, start_date[:10], end_date)
+    else:
+        if not file_path:
+            return jsonify({"error": "File path cannot be empty"}), 400
+        df, error = load_data_file(file_path)
 
-    df, error = load_data_file(file_path)
     if error:
         return jsonify({"error": error}), 400
 

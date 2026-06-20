@@ -490,6 +490,22 @@
                     <small class="form-text">Select K-line data file from data directory</small>
                 </div>
 
+                <div class="form-group">
+                    <label for="stock-code-input">Factorhub Stock Code:</label>
+                    <input type="text" id="stock-code-input" value="000001" placeholder="e.g. 000001">
+                    <small class="form-text">Used when selecting Factorhub Single Stock as data source</small>
+                </div>
+
+                <div class="form-group">
+                    <label for="source-start-date">Source Start Date:</label>
+                    <input type="date" id="source-start-date" value="2024-01-01">
+                </div>
+
+                <div class="form-group">
+                    <label for="source-end-date">Source End Date:</label>
+                    <input type="date" id="source-end-date" value="2024-12-31">
+                </div>
+
                 <button id="load-data-btn" class="btn btn-secondary">
                     📁 Load Data
                 </button>
@@ -762,7 +778,8 @@
                 dataFiles.forEach(file => {
                     const option = document.createElement('option');
                     option.value = file.path;
-                    option.textContent = `${file.name} (${file.size})`;
+                    option.dataset.sourceType = file.source_type || 'local_file';
+                    option.textContent = `${file.name} (${file.size || file.description || ''})`;
                     dataFileSelect.appendChild(option);
                 });
                 
@@ -776,6 +793,11 @@
         // Load data file
         async function loadData() {
             const filePath = document.getElementById('data-file-select').value;
+            const selectedOption = document.getElementById('data-file-select').selectedOptions[0];
+            const sourceType = selectedOption?.dataset?.sourceType || 'local_file';
+            const stockCode = document.getElementById('stock-code-input').value.trim();
+            const sourceStartDate = document.getElementById('source-start-date').value;
+            const sourceEndDate = document.getElementById('source-end-date').value;
             
             if (!filePath) {
                 showStatus('error', 'Please select a data file to load');
@@ -786,13 +808,23 @@
                 showLoading(true);
                 document.getElementById('load-data-btn').disabled = true;
                 
-                const response = await axios.post('/api/load-data', {
-                    file_path: filePath
-                });
+                const requestPayload = {
+                    file_path: filePath,
+                    source_type: sourceType,
+                    stock_code: stockCode,
+                    start_date: sourceStartDate,
+                    end_date: sourceEndDate
+                };
+                
+                const response = await axios.post('/api/load-data', requestPayload);
                 
                 if (response.data.success) {
                     currentDataFile = filePath;
                     currentDataInfo = response.data.data_info;
+                    window.currentDataSourceType = sourceType;
+                    window.currentStockCode = stockCode;
+                    window.currentSourceStartDate = sourceStartDate;
+                    window.currentSourceEndDate = sourceEndDate;
                     showDataInfo(response.data.data_info);
                     showStatus('success', response.data.message);
                     
@@ -1068,6 +1100,9 @@
                 
                 let predictionParams = {
                     file_path: currentDataFile,
+                    source_type: window.currentDataSourceType || 'local_file',
+                    stock_code: window.currentStockCode || '',
+                    end_date: window.currentSourceEndDate || '',
                     lookback: lookback,
                     pred_len: predLen,
                     start_date: startDate.toISOString().slice(0, 16), // Format as YYYY-MM-DDTHH:MM
