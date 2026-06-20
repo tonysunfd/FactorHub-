@@ -450,6 +450,17 @@ export const api = {
     return request.get(`/mining/tasks?${params.toString()}`, { timeout: 120000 })
   },
 
+  listMiningHistory(kind?: string, limit = 20) {
+    const params = new URLSearchParams()
+    if (kind) params.set('kind', kind)
+    params.set('limit', String(limit))
+    return request.get(`/mining/history?${params.toString()}`, { timeout: 120000 })
+  },
+
+  deleteMiningHistory(historyId: number) {
+    return request.delete(`/mining/history/${historyId}`, { timeout: 120000 })
+  },
+
   startRDAgentMining(data: RDAgentMiningRequest) {
     return request.post('/mining/rdagent', data, { timeout: 300000 })
   },

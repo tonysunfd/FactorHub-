@@ -23,6 +23,7 @@ rsync -az --delete \
   --exclude 'log' \
   --exclude 'logs' \
   --exclude '*.db' \
+  --exclude 'config/llm_config.json' \
   "${ROOT_DIR}/" "${REMOTE_HOST}:${REMOTE_DIR}/"
 
 echo "==> Building and starting docker service on ${REMOTE_HOST}"

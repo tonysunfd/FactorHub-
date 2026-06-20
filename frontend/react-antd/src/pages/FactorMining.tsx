@@ -100,7 +100,7 @@ const buildLlmSelectionEvidence = (payload?: Record<string, any> | null) => {
   };
 };
 
-type MiningMode = "manual" | "auto" | "rdagent";
+type MiningMode = "manual" | "auto" | "rdagent" | "history";
 type RDAgentBootstrapMode = "manual" | "llm_auto";
 type PersistedMiningTaskKind = "genetic" | "auto" | "auto_campaign" | "auto_continue";
 
@@ -121,7 +121,7 @@ interface ManualFactor {
   fitness: number;
 }
 
-interface AutoFactor {
+  interface AutoFactor {
   name: string;
   expression: string;
   score: number;
@@ -145,6 +145,7 @@ interface AutoFactor {
   task_id?: string;
   source_expression?: string;
   source?: string;
+  history_request_payload?: Record<string, any>;
 }
 
 const getFactorDetailKey = (factor: AutoFactor, index: number) =>
@@ -407,6 +408,23 @@ interface PersistedMiningTaskState {
   kind: PersistedMiningTaskKind;
   status?: string;
   updatedAt?: string;
+}
+
+interface MiningHistoryEntry {
+  id: number;
+  task_id: string;
+  kind: string;
+  status: string;
+  title: string;
+  summary: string;
+  request_payload?: Record<string, any>;
+  result_payload?: Record<string, any>;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+interface SaveFactorOptions {
+  sourceMode?: Exclude<MiningMode, "history">;
 }
 
 interface LocalWQBrainState {
@@ -1061,6 +1079,9 @@ const FactorMining: React.FC = () => {
   const [wqSubmittingKeys, setWqSubmittingKeys] = useState<Record<string, boolean>>({});
   const [wqSyncingKeys, setWqSyncingKeys] = useState<Record<string, boolean>>({});
   const [wqBulkSyncing, setWqBulkSyncing] = useState(false);
+  const [miningHistory, setMiningHistory] = useState<MiningHistoryEntry[]>([]);
+  const [miningHistoryLoading, setMiningHistoryLoading] = useState(false);
+  const [deletingHistoryIds, setDeletingHistoryIds] = useState<Record<number, boolean>>({});
 
   const currentStatus = activeTab === "manual" ? manualStatus : autoStatus;
   const currentAutoDisplayResult = useMemo(() => {
@@ -1161,6 +1182,20 @@ const FactorMining: React.FC = () => {
     }
   };
 
+  const loadMiningHistory = async () => {
+    setMiningHistoryLoading(true);
+    try {
+      const response = (await api.listMiningHistory(undefined, 50)) as any;
+      if (response.success) {
+        setMiningHistory((response.data || []) as MiningHistoryEntry[]);
+      }
+    } catch (error) {
+      console.error("加载挖掘历史失败:", error);
+    } finally {
+      setMiningHistoryLoading(false);
+    }
+  };
+
   const loadLLMConfig = async () => {
     setLlmConfigLoading(true);
     try {
@@ -1219,6 +1254,25 @@ const FactorMining: React.FC = () => {
     setPersistedMiningTaskState(null);
   };
 
+  const deleteMiningHistoryEntry = async (historyId: number) => {
+    setDeletingHistoryIds((prev) => ({ ...prev, [historyId]: true }));
+    try {
+      const response = (await api.deleteMiningHistory(historyId)) as any;
+      if (response.success) {
+        message.success("挖掘记录已删除");
+        setMiningHistory((prev) => prev.filter((item) => item.id !== historyId));
+      }
+    } catch (error: any) {
+      message.error(error?.message || "删除挖掘记录失败");
+    } finally {
+      setDeletingHistoryIds((prev) => {
+        const next = { ...prev };
+        delete next[historyId];
+        return next;
+      });
+    }
+  };
+
   useEffect(() => {
     const handleResize = () => setIsMobileView(window.innerWidth <= 768);
     if (typeof window !== "undefined") {
@@ -1228,6 +1282,7 @@ const FactorMining: React.FC = () => {
     loadFactors();
     loadLLMConfig();
     loadRDAgentRuntimeStatus();
+    void loadMiningHistory();
     const endDate = dayjs();
     const startDate = dayjs().subtract(1, "year");
 
@@ -1343,6 +1398,12 @@ const FactorMining: React.FC = () => {
       resultChartInstanceRef.current?.dispose();
     };
   }, []);
+
+  useEffect(() => {
+    if (activeTab === "history") {
+      void loadMiningHistory();
+    }
+  }, [activeTab]);
 
   useEffect(() => {
     if (activeTab === "auto") {
@@ -2641,7 +2702,14 @@ const FactorMining: React.FC = () => {
     }
   };
 
-  const saveFactor = async (factor: ManualFactor | AutoFactor, index: number, retryCount = 0): Promise<any | null> => {
+  const saveFactor = async (
+    factor: ManualFactor | AutoFactor,
+    index: number,
+    retryCount = 0,
+    options?: SaveFactorOptions,
+  ): Promise<any | null> => {
+    const sourceMode = options?.sourceMode || (activeTab === "history" ? "auto" : activeTab);
+    const isSourceAutoLike = sourceMode !== "manual";
     const today = new Date();
     const dateStr = [
       today.getFullYear(),
@@ -2652,7 +2720,7 @@ const FactorMining: React.FC = () => {
       String(today.getSeconds()).padStart(2, "0"),
     ].join("");
     const stockCode = currentStockCode || "Unknown";
-    const baseFactorName = `${activeTab === "manual" ? "Mined" : activeTab === "rdagent" ? "RDAgentMined" : "AutoMined"}_Factor_${index + 1}_${dateStr}_${stockCode}`;
+    const baseFactorName = `${sourceMode === "manual" ? "Mined" : sourceMode === "rdagent" ? "RDAgentMined" : "AutoMined"}_Factor_${index + 1}_${dateStr}_${stockCode}`;
     const factorName = retryCount === 0 ? baseFactorName : `${baseFactorName}_${retryCount}`;
 
     try {
@@ -2664,32 +2732,43 @@ const FactorMining: React.FC = () => {
         .replace(/\blow\b/g, "df['low']")
         .replace(/\bvolume\b/g, "df['volume']");
 
-      const description = activeTab === "manual"
+      const description = sourceMode === "manual"
         ? `手动挖掘因子 | 表达式: ${rawExpr} | IC: ${(factor as ManualFactor).ic?.toFixed?.(4) || "-"} | IR: ${(factor as ManualFactor).ir?.toFixed?.(4) || "-"}`
-        : `${activeTab === "rdagent" ? "RDAgent 挖掘因子" : "自动挖掘因子"} | 表达式: ${rawExpr} | Score: ${(factor as AutoFactor).score?.toFixed?.(1) || "-"} | Grade: ${(factor as AutoFactor).grade || "-"}`;
+        : `${sourceMode === "rdagent" ? "RDAgent 挖掘因子" : "自动挖掘因子"} | 表达式: ${rawExpr} | Score: ${(factor as AutoFactor).score?.toFixed?.(1) || "-"} | Grade: ${(factor as AutoFactor).grade || "-"}`;
 
       const factorCode = `def calculate_factor(df):\n    \"\"\"${description}\"\"\"\n    import pandas as pd\n    import numpy as np\n    try:\n        result = ${processedExpr}\n        return result\n    except Exception:\n        return pd.Series(0, index=df.index)\n`;
 
-      const normalizedAutoTaskDetails = isAutoLikeTab
+      const normalizedAutoTaskDetails = isSourceAutoLike
         ? buildFactorTaskDetailsForDashboard(factor as AutoFactor)
         : null;
-      const sourceTaskId = isAutoLikeTab
+      const sourceTaskId = isSourceAutoLike
         ? ((factor as any).automation_meta?.round_task_id || autoStatus?.task_id || autoCampaignResult?.final_round_task_id)
         : undefined;
 
+      const historyRequestPayload = (factor as AutoFactor).history_request_payload || {};
+      const targetUniverse = isSourceAutoLike
+        ? String(
+            historyRequestPayload.universe
+            || (sourceMode === "rdagent" ? rdAgentForm : autoForm).getFieldValue("universe")
+            || ""
+          ).trim()
+        : "";
+      const targetStockCode = sourceMode === "manual"
+        ? String(historyRequestPayload.stock_code || manualForm.getFieldValue("stock_code") || "").trim()
+        : "";
       const response = (await api.createFactor({
         name: factorName,
         code: factorCode,
-        category: resolveSavedFactorCategory(activeTab, factor),
+        category: resolveSavedFactorCategory(sourceMode, factor),
         description,
         formula_type: "function",
-        scope_type: activeTab === "manual" ? "stock" : "universe",
-        target_stock_code: activeTab === "manual" ? String(manualForm.getFieldValue("stock_code") || "").trim() : "",
-        target_universe: isAutoLikeTab ? String((activeTab === "rdagent" ? rdAgentForm : autoForm).getFieldValue("universe") || "").trim() : "",
-        origin_type: activeTab === "manual" ? "genetic_mining" : activeTab === "rdagent" ? "rdagent_mining" : "auto_mining",
-        task_metadata: isAutoLikeTab ? {
+        scope_type: sourceMode === "manual" ? "stock" : "universe",
+        target_stock_code: targetStockCode,
+        target_universe: targetUniverse,
+        origin_type: sourceMode === "manual" ? "genetic_mining" : sourceMode === "rdagent" ? "rdagent_mining" : "auto_mining",
+        task_metadata: isSourceAutoLike ? {
           task_id: sourceTaskId,
-          source: (factor as AutoFactor).source || (activeTab === "rdagent" ? "factorhub_rdagent_campaign" : "factorhub_auto_iteration"),
+          source: (factor as AutoFactor).source || (sourceMode === "rdagent" ? "factorhub_rdagent_campaign" : "factorhub_auto_iteration"),
           task_details: {
             ...(normalizedAutoTaskDetails || {}),
             expression: normalizedAutoTaskDetails?.expression || rawExpr,
@@ -2697,8 +2776,8 @@ const FactorMining: React.FC = () => {
         } : {
           source_expression: rawExpr,
           params: {
-            stock_code: String(manualForm.getFieldValue("stock_code") || "").trim(),
-            base_factors: manualForm.getFieldValue("base_factors") || [],
+            stock_code: targetStockCode,
+            base_factors: historyRequestPayload.base_factors || manualForm.getFieldValue("base_factors") || [],
           },
         },
       })) as any;
@@ -2713,7 +2792,7 @@ const FactorMining: React.FC = () => {
     } catch (error: any) {
       const errorMsg = error?.response?.data?.detail || error?.message || "未知错误";
       if (String(errorMsg).includes("已存在") && retryCount < 5) {
-        return await saveFactor(factor, index, retryCount + 1);
+        return await saveFactor(factor, index, retryCount + 1, options);
       } else {
         message.error(`保存因子失败: ${errorMsg}`);
       }
@@ -2739,6 +2818,134 @@ const FactorMining: React.FC = () => {
       // eslint-disable-next-line no-await-in-loop
       await saveFactor(factorsToSave[i] as any, i);
     }
+  };
+
+  const getHistoryEntryFactors = (entry: MiningHistoryEntry): AutoFactor[] => {
+    const payload = entry.result_payload || {};
+    const rawFactors = (
+      payload.retained_factors
+      || payload.top_factors
+      || payload.factors
+      || payload.final_round_result?.factors
+      || []
+    ) as any[];
+    return rawFactors.map((factor) =>
+      entry.kind === "rdagent"
+        ? {
+            ...normalizeRDAgentFactorForDashboard(
+              factor,
+              factor?.automation_meta?.round_index,
+              factor?.automation_meta?.round_task_id || entry.task_id,
+            ),
+            history_request_payload: entry.request_payload || {},
+          }
+        : {
+            ...factor,
+            task_id: factor?.task_id || entry.task_id,
+            history_request_payload: entry.request_payload || {},
+            task_details: buildFactorTaskDetailsForDashboard(factor) || factor?.task_details || factor?.quantgpt_task_details,
+            quantgpt_task_details: buildFactorTaskDetailsForDashboard(factor) || factor?.quantgpt_task_details || factor?.task_details,
+            automation_meta: {
+              ...(factor?.automation_meta || {}),
+              round_task_id: factor?.automation_meta?.round_task_id || entry.task_id,
+              source: factor?.source || entry.kind,
+            },
+          }
+    );
+  };
+
+  const saveHistoryFactor = async (entry: MiningHistoryEntry, factor: AutoFactor, index: number) => {
+    const sourceMode: Exclude<MiningMode, "history"> = entry.kind === "rdagent" ? "rdagent" : entry.kind === "genetic" ? "manual" : "auto";
+    await saveFactor(factor, index, 0, { sourceMode });
+  };
+
+  const renderMiningHistoryTab = () => {
+    return (
+      <Card
+        title="挖掘记录"
+        className="result-card"
+        extra={
+          <Button icon={<OrderedListOutlined />} onClick={() => void loadMiningHistory()} loading={miningHistoryLoading}>
+            刷新记录
+          </Button>
+        }
+      >
+        {miningHistory.length ? (
+          <Space direction="vertical" size={16} style={{ width: "100%" }}>
+            {miningHistory.map((entry) => {
+              const entryFactors = getHistoryEntryFactors(entry);
+              return (
+                <Card
+                  key={entry.id}
+                  size="small"
+                  title={entry.title || "未命名挖掘记录"}
+                  extra={
+                    <Space>
+                      <Tag color={entry.kind === "rdagent" ? "gold" : entry.kind === "genetic" ? "blue" : "green"}>
+                        {entry.kind}
+                      </Tag>
+                      <Button
+                        danger
+                        size="small"
+                        loading={!!deletingHistoryIds[entry.id]}
+                        onClick={() => void deleteMiningHistoryEntry(entry.id)}
+                      >
+                        删除记录
+                      </Button>
+                    </Space>
+                  }
+                >
+                  <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                    <div>
+                      <div style={{ fontWeight: 600, marginBottom: 4 }}>{entry.summary || "暂无摘要"}</div>
+                      <div className="text-hint">
+                        任务 ID：{entry.task_id}；更新时间：{entry.updated_at ? dayjs(entry.updated_at).format("YYYY-MM-DD HH:mm:ss") : "-"}
+                      </div>
+                    </div>
+                    {entryFactors.length ? (
+                      <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                        {entryFactors.slice(0, 10).map((factor, index) => (
+                          <Card
+                            key={`${entry.id}-${factor.name || index}`}
+                            size="small"
+                            bordered={false}
+                            style={{ background: "#fafafa" }}
+                            title={factor.name || `候选因子 ${index + 1}`}
+                            extra={
+                              <Button
+                                type="primary"
+                                size="small"
+                                icon={<SaveOutlined />}
+                                onClick={() => void saveHistoryFactor(entry, factor, index)}
+                              >
+                                保存到因子库
+                              </Button>
+                            }
+                          >
+                            <Space wrap size={[8, 8]} style={{ marginBottom: 8 }}>
+                              {typeof factor.score === "number" ? <Tag color="blue">Score {factor.score.toFixed(2)}</Tag> : null}
+                              {factor.grade ? <Tag color="purple">Grade {factor.grade}</Tag> : null}
+                              {typeof factor.rank_ic === "number" ? <Tag color="cyan">Rank IC {factor.rank_ic.toFixed(4)}</Tag> : null}
+                            </Space>
+                            <div style={{ fontFamily: "monospace", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                              {factor.expression || "-"}
+                            </div>
+                          </Card>
+                        ))}
+                      </Space>
+                    ) : (
+                      <Alert type="info" showIcon message="当前记录没有可展示的候选因子" />
+                    )}
+                  </Space>
+                </Card>
+              );
+            })}
+          </Space>
+        ) : (
+          <Alert type="info" showIcon message={miningHistoryLoading ? "正在加载挖掘记录" : "暂无挖掘记录"} />
+        )}
+      </Card>
+    );
   };
 
   const handleSubmitFactorToWQBrain = async (factor: AutoFactor, index: number) => {
@@ -5731,6 +5938,11 @@ const FactorMining: React.FC = () => {
             key: "rdagent",
             label: "RDAgent 挖掘",
             children: renderRDAgentMiningTab(),
+          },
+          {
+            key: "history",
+            label: "挖掘记录",
+            children: renderMiningHistoryTab(),
           },
         ]} />
       </div>

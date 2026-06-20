@@ -4,12 +4,15 @@ import math
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from backend.services.expression_schema import FactorEvaluationResult
+from backend.services.factor_service import FactorCalculator
 from backend.services.rdagent_factor_mining_service import (
     RDAgentFactorMiningService,
     RDAgentMiningConfig,
 )
+from backend.services.report_service import generate_report
 
 
 def _build_evaluation(
@@ -719,6 +722,28 @@ def test_rdagent_native_code_mode_uses_factorhub_data_and_local_evaluation(monke
     assert "implementation_code" in (factor.get("execution_meta") or {})
 
 
+def test_factor_calculator_function_mode_derives_vwap_from_amount_and_volume() -> None:
+    calculator = FactorCalculator()
+    frame = _build_mock_stock_frame("000001.SZ")
+    if "vwap" in frame.columns:
+        frame = frame.drop(columns=["vwap"])
+
+    result = calculator.calculate(
+        frame,
+        "\n".join(
+            [
+                "def calculate_factor(df):",
+                "    close = pd.to_numeric(df['close'], errors='coerce')",
+                "    vwap = pd.to_numeric(df['vwap'], errors='coerce')",
+                "    return pd.Series(close - vwap, index=df.index, dtype=float)",
+            ]
+        ),
+    )
+
+    assert isinstance(result, pd.Series)
+    assert result.notna().sum() > 0
+
+
 def test_rdagent_upstream_mode_reuses_reference_proposal_and_local_evaluation(monkeypatch) -> None:
     monkeypatch.setattr(
         "backend.services.rdagent_factor_mining_service.probe_rdagent_module_import",
@@ -1180,6 +1205,69 @@ def test_rdagent_upstream_mode_converts_real_failure_formulations_from_task(monk
     assert any("ts_sum(volume,10)" in expression for expression in expressions)
     assert any("ts_sum(amount,10)" in expression for expression in expressions)
     assert len(result["top_factors"]) == 3
+
+
+def test_generate_report_handles_quantstats_series_metrics(monkeypatch, tmp_path) -> None:
+    class _FakeStats:
+        @staticmethod
+        def comp(returns):
+            return pd.Series([0.12])
+
+        @staticmethod
+        def cagr(returns, periods=252):
+            return pd.Series([0.15])
+
+        @staticmethod
+        def sharpe(returns, rf=0.03, periods=252):
+            return pd.Series([1.1])
+
+        @staticmethod
+        def sortino(returns, rf=0.03, periods=252):
+            return pd.Series([1.4])
+
+        @staticmethod
+        def max_drawdown(returns):
+            return pd.Series([-0.08])
+
+        @staticmethod
+        def volatility(returns, periods=252):
+            return pd.Series([0.2])
+
+        @staticmethod
+        def win_rate(returns):
+            return pd.Series([0.56])
+
+        @staticmethod
+        def profit_factor(returns):
+            return pd.Series([1.7])
+
+    class _FakeReports:
+        @staticmethod
+        def html(returns, benchmark=None, output=None, title=None, rf=0.03, match_dates=False, periods_per_year=252):
+            if output is None:
+                raise AssertionError("output should be provided")
+            with open(output, "w", encoding="utf-8") as fh:
+                fh.write("<html><head></head><body>report</body></html>")
+
+    fake_qs = SimpleNamespace(stats=_FakeStats(), reports=_FakeReports())
+    monkeypatch.setitem(__import__("sys").modules, "quantstats", fake_qs)
+
+    returns = pd.Series(
+        [0.01, -0.02, 0.015, 0.005],
+        index=pd.date_range("2024-01-01", periods=4, freq="D"),
+        dtype=float,
+    )
+
+    result = generate_report(
+        returns,
+        output_dir=str(tmp_path),
+        periods_per_year=252,
+    )
+
+    metrics = result["metrics"]
+    assert metrics["sharpe"] == pytest.approx(1.1)
+    assert metrics["max_drawdown"] == pytest.approx(-0.08)
+    assert metrics["volatility"] == pytest.approx(0.2)
 
 
 def test_rdagent_upstream_mode_converts_operatorname_reference_formulations(monkeypatch) -> None:

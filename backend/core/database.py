@@ -34,6 +34,7 @@ def init_db() -> None:
     from backend.models.paper import PaperStrategyModel, PaperSnapshotModel, PaperOrderModel
     from backend.models.cache_metadata import CacheMetadataModel
     from backend.models.factor_version import FactorVersionModel
+    from backend.models.mining_history import MiningHistoryModel
 
     Base.metadata.create_all(bind=engine)
     _ensure_schema_compatibility()

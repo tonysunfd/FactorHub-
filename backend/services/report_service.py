@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 
 import matplotlib
+import numpy as np
 import pandas as pd
 
 matplotlib.use("Agg")
@@ -28,6 +29,32 @@ body { margin: 15px !important; }
 }
 </style>
 """
+
+
+def _coerce_metric_scalar(value: object, default: float = 0.0) -> float:
+    if isinstance(value, pd.Series):
+        if value.empty:
+            return default
+        value = value.dropna()
+        if value.empty:
+            return default
+        value = value.iloc[-1]
+    elif isinstance(value, np.ndarray):
+        if value.size == 0:
+            return default
+        flat = value.reshape(-1)
+        valid = [item for item in flat.tolist() if pd.notna(item)]
+        if not valid:
+            return default
+        value = valid[-1]
+
+    try:
+        numeric = float(value)
+    except Exception:
+        return default
+    if pd.isna(numeric) or np.isinf(numeric):
+        return default
+    return numeric
 
 
 def generate_report(
@@ -78,19 +105,19 @@ def generate_report(
     logger.info("Report saved: %s", report_path)
 
     metrics = {
-        "total_return": float(qs.stats.comp(returns)),
-        "cagr": float(qs.stats.cagr(returns, periods=periods_per_year)),
-        "sharpe": float(qs.stats.sharpe(returns, rf=0.03, periods=periods_per_year)),
-        "sortino": float(qs.stats.sortino(returns, rf=0.03, periods=periods_per_year)),
-        "max_drawdown": float(qs.stats.max_drawdown(returns)),
-        "volatility": float(qs.stats.volatility(returns, periods=periods_per_year)),
-        "win_rate": float(qs.stats.win_rate(returns)),
-        "profit_factor": float(qs.stats.profit_factor(returns)),
+        "total_return": _coerce_metric_scalar(qs.stats.comp(returns)),
+        "cagr": _coerce_metric_scalar(qs.stats.cagr(returns, periods=periods_per_year)),
+        "sharpe": _coerce_metric_scalar(qs.stats.sharpe(returns, rf=0.03, periods=periods_per_year)),
+        "sortino": _coerce_metric_scalar(qs.stats.sortino(returns, rf=0.03, periods=periods_per_year)),
+        "max_drawdown": _coerce_metric_scalar(qs.stats.max_drawdown(returns)),
+        "volatility": _coerce_metric_scalar(qs.stats.volatility(returns, periods=periods_per_year)),
+        "win_rate": _coerce_metric_scalar(qs.stats.win_rate(returns)),
+        "profit_factor": _coerce_metric_scalar(qs.stats.profit_factor(returns)),
     }
 
     if aligned_benchmark is not None:
-        metrics["benchmark_total_return"] = float(qs.stats.comp(aligned_benchmark))
-        metrics["benchmark_cagr"] = float(qs.stats.cagr(aligned_benchmark, periods=periods_per_year))
+        metrics["benchmark_total_return"] = _coerce_metric_scalar(qs.stats.comp(aligned_benchmark))
+        metrics["benchmark_cagr"] = _coerce_metric_scalar(qs.stats.cagr(aligned_benchmark, periods=periods_per_year))
 
     return {"report_path": report_path, "metrics": metrics}
 

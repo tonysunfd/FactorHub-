@@ -38,6 +38,7 @@ from backend.services.research_tools.factor_selection_service import (
     load_factor_candidates_for_llm,
     normalize_factor_expression_key,
 )
+from backend.services.mining_history_service import mining_history_service
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -309,6 +310,54 @@ def _build_task_list_item(task_id: str, task: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _build_history_title(kind: str, request_payload: dict[str, Any], result_payload: dict[str, Any]) -> str:
+    if kind == "rdagent":
+        objective = str(request_payload.get("objective") or "").strip()
+        return objective or "RDAgent 因子挖掘"
+    if kind in {"auto_campaign", "auto_continue", "auto"}:
+        prompt = str(request_payload.get("prompt") or "").strip()
+        return prompt or "自动因子挖掘"
+    if kind == "genetic":
+        stock_code = str(request_payload.get("stock_code") or "").strip()
+        return f"手动遗传挖掘 {stock_code}".strip()
+    return "因子挖掘记录"
+
+
+def _build_history_summary(kind: str, request_payload: dict[str, Any], result_payload: dict[str, Any]) -> str:
+    if kind == "rdagent":
+        retained_count = len(result_payload.get("retained_factors") or [])
+        best_score = float(result_payload.get("best_score") or 0.0)
+        return f"RDAgent 完成，保留 {retained_count} 个候选，最佳分数 {best_score:.2f}"
+    if kind in {"auto_campaign", "auto_continue"}:
+        retained_count = len(result_payload.get("retained_factors") or [])
+        best_score = float(result_payload.get("best_score") or 0.0)
+        return f"自动化探索完成，保留 {retained_count} 个候选，最佳分数 {best_score:.2f}"
+    if kind == "auto":
+        factor_count = len(result_payload.get("factors") or [])
+        best_score = float(result_payload.get("best_score") or 0.0)
+        return f"自动挖掘完成，生成 {factor_count} 个因子，最佳分数 {best_score:.2f}"
+    if kind == "genetic":
+        factor_count = len(result_payload.get("factors") or [])
+        best_fitness = float(result_payload.get("best_fitness") or 0.0)
+        return f"手动挖掘完成，生成 {factor_count} 个因子，最佳适应度 {best_fitness:.4f}"
+    return "挖掘任务已完成"
+
+
+def _persist_mining_history(task_id: str, task: dict[str, Any]) -> None:
+    result_payload = sanitize_payload(task.get("result") or {})
+    request_payload = sanitize_payload(task.get("request") or {})
+    kind = str(task.get("kind") or "")
+    mining_history_service.save_entry(
+        task_id=task_id,
+        kind=kind,
+        status=str(task.get("status") or "completed"),
+        title=_build_history_title(kind, request_payload, result_payload),
+        summary=_build_history_summary(kind, request_payload, result_payload),
+        request_payload=request_payload,
+        result_payload=result_payload,
+    )
+
+
 def _raise_if_rdagent_task_cancel_requested(task_id: str) -> None:
     task = rdagent_tasks.get(task_id)
     if not task:
@@ -515,6 +564,7 @@ async def _run_rdagent_mining(task_id: str, request: RDAgentMiningRequest) -> No
         task["retained_count"] = len(retained_factors)
         task["upstream_status"] = "rdagent_completed"
         task["updated_at"] = asyncio.get_running_loop().time()
+        _persist_mining_history(task_id, task)
     except RDAgentTaskCancelled as exc:
         logger.info("RDAgent task %s cancelled: %s", task_id, exc)
         task["status"] = "cancelled"
@@ -572,6 +622,7 @@ async def _run_auto_mining(task_id: str, request: AutoMiningRequest):
             avg_key="avg_score",
             round_evaluation=result.get("round_evaluation"),
         )
+        _persist_mining_history(task_id, mining_tasks[task_id])
     except Exception as exc:
         logger.error("Auto mining task %s failed: %s", task_id, exc, exc_info=True)
         mining_tasks[task_id]["status"] = "failed"
@@ -642,6 +693,7 @@ async def _run_auto_campaign(task_id: str, request: AutoMiningCampaignRequest):
         mining_tasks[task_id]["rounds"] = campaign_result.get("rounds", [])
         mining_tasks[task_id]["latest_round"] = mining_tasks[task_id]["rounds"][-1] if mining_tasks[task_id]["rounds"] else None
         mining_tasks[task_id]["upstream_status"] = "completed_campaign"
+        _persist_mining_history(task_id, mining_tasks[task_id])
     except Exception as exc:
         logger.error("Auto campaign task %s failed: %s", task_id, exc, exc_info=True)
         mining_tasks[task_id]["status"] = "failed"
@@ -984,6 +1036,28 @@ async def list_mining_tasks(kind: Optional[str] = None, limit: int = 20):
     }
 
 
+@router.get("/history")
+async def list_mining_history(kind: Optional[str] = None, limit: int = 20):
+    """返回持久化的挖掘历史记录。"""
+    normalized_limit = max(int(limit or 20), 1)
+    return {
+        "success": True,
+        "data": mining_history_service.list_entries(limit=normalized_limit, kind=kind),
+    }
+
+
+@router.delete("/history/{history_id}")
+async def delete_mining_history(history_id: int):
+    """删除一条挖掘历史记录。"""
+    deleted = mining_history_service.delete_entry(history_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="历史记录不存在")
+    return {
+        "success": True,
+        "message": "挖掘历史记录已删除",
+    }
+
+
 @router.get("/reports/{filename}")
 async def get_auto_mining_report(filename: str):
     """获取自动挖掘生成的 HTML 报告。"""
@@ -1154,6 +1228,7 @@ def _store_manual_mining_result(task_id: str, generations: int, result: dict[str
         result_data,
         candidates=result_data["factors"],
     )
+    _persist_mining_history(task_id, mining_tasks[task_id])
 
 
 def _run_simulated_mining_sync(task_id: str, request: GeneticMiningRequest, data, base_factor_codes, factor_service):

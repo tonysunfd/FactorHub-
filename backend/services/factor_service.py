@@ -236,8 +236,10 @@ class FactorCalculator:
 
     def _build_local_vars(self, df: pd.DataFrame) -> dict:
         """构建表达式执行上下文，自动暴露 DataFrame 中的列。"""
+        enriched_df = self._enrich_runtime_frame(df)
+
         local_vars = {
-            "df": df,
+            "df": enriched_df,
             "np": np,
             "pd": pd,
             "int": int,
@@ -254,8 +256,8 @@ class FactorCalculator:
             **self.mylanguage_funcs,
         }
 
-        for column in df.columns:
-            local_vars[column] = df[column]
+        for column in enriched_df.columns:
+            local_vars[column] = enriched_df[column]
 
         price_aliases = {
             "C": "close",
@@ -271,9 +273,18 @@ class FactorCalculator:
         }
         for alias, column in price_aliases.items():
             if column in df.columns:
-                local_vars[alias] = df[column]
+                local_vars[alias] = enriched_df[column]
 
         return local_vars
+
+    @staticmethod
+    def _enrich_runtime_frame(df: pd.DataFrame) -> pd.DataFrame:
+        enriched_df = df.copy()
+        if "vwap" not in enriched_df.columns and {"amount", "volume"} <= set(enriched_df.columns):
+            volume = pd.to_numeric(enriched_df["volume"], errors="coerce").replace(0, np.nan)
+            amount = pd.to_numeric(enriched_df["amount"], errors="coerce")
+            enriched_df["vwap"] = amount / volume
+        return enriched_df
 
     def calculate(self, df: pd.DataFrame, factor_code: str) -> pd.Series:
         """
@@ -294,6 +305,7 @@ class FactorCalculator:
         is_function = len(code_lines) > 0 and code_lines[0].strip().startswith("def ")
 
         if is_function:
+            runtime_df = self._enrich_runtime_frame(df)
             # 函数形式：使用 exec 执行函数定义，然后调用函数
             # 提供完整的全局变量，包括 pandas, numpy 和常见函数
             global_vars = {
@@ -305,7 +317,7 @@ class FactorCalculator:
                     "any": any, "all": all, "enumerate": enumerate, "zip": zip,
                     "round": round, "pow": pow, "divmod": divmod,
                 },
-                **self._build_local_vars(df),
+                **self._build_local_vars(runtime_df),
             }
 
             local_vars = {}
@@ -321,7 +333,7 @@ class FactorCalculator:
                 if calc_func is None:
                     raise ValueError("函数代码中未找到 'calculate_factor' 函数定义")
 
-                result = calc_func(df)
+                result = calc_func(runtime_df)
 
                 if isinstance(result, pd.DataFrame):
                     # 如果返回DataFrame，取第一列
